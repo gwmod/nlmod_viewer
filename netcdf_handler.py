@@ -404,37 +404,55 @@ class NetcdfHandler:
             xi = np.abs(x_var[:, None] - xs[None, :]).argmin(axis=0)
             yi = np.abs(y_var[:, None] - ys[None, :]).argmin(axis=0)
 
+            # Identify out-of-bounds points
+            x_min_val, x_max_val = np.min(x_var), np.max(x_var)
+            y_min_val, y_max_val = np.min(y_var), np.max(y_var)
+            
+            # Allow for half a cell margin (approximate)
+            dx = np.abs(x_var[1] - x_var[0]) if len(x_var) > 1 else 1.0
+            dy = np.abs(y_var[1] - y_var[0]) if len(y_var) > 1 else 1.0
+            
+            oob_mask = (xs < x_min_val - dx/2) | (xs > x_max_val + dx/2) | \
+                       (ys < y_min_val - dy/2) | (ys > y_max_val + dy/2)
+
             # 3. Extract Data (Bounding Box Optimization)
             # Instead of looping or reading fully, read the bounding range
-            x_min, x_max = xi.min(), xi.max()
-            y_min, y_max = yi.min(), yi.max()
+            x_min_idx, x_max_idx = xi.min(), xi.max()
+            y_min_idx, y_max_idx = yi.min(), yi.max()
             
             # Slices (inclusive end for numpy slice requires +1)
-            # NetCDF4 supports this efficient reading
-            sl_y = slice(y_min, y_max + 1)
-            sl_x = slice(x_min, x_max + 1)
+            sl_y = slice(y_min_idx, y_max_idx + 1)
+            sl_x = slice(x_min_idx, x_max_idx + 1)
             
             # Local indices relative to the chunk
-            xi_local = xi - x_min
-            yi_local = yi - y_min
+            xi_local = xi - x_min_idx
+            yi_local = yi - y_min_idx
             
             # Check if variables exist
             if 'top' not in self.ds.variables or 'botm' not in self.ds.variables:
                 return {"error": "Dataset missing 'top' or 'botm'."}
 
-            # Read chunks (returns multidimensional array)
-            # top: (y, x) -> chunk (sub_y, sub_x)
-            top_chunk = self.ds.variables['top'][sl_y, sl_x]
-            # botm: (nlay, y, x) -> chunk (nlay, sub_y, sub_x)
-            botm_chunk = self.ds.variables['botm'][:, sl_y, sl_x]
+            # Read chunks and handle MaskedArrays
+            def get_data(varname, slice_obj=None):
+                var = self.ds.variables[varname]
+                if slice_obj:
+                    data = var[slice_obj]
+                else:
+                    data = var[:]
+                if isinstance(data, np.ma.MaskedArray):
+                    return data.filled(np.nan)
+                return data.astype(float)
+
+            # Extract top and botm
+            top_chunk = get_data('top', (sl_y, sl_x))
+            botm_chunk = get_data('botm', (slice(None), sl_y, sl_x))
             
-            # Fancy Indexing to get points along line
-            # top_chunk[yi_local, xi_local] returns (Npoints,)
             top = top_chunk[yi_local, xi_local]
-            
-            # botm_chunk: (L, Y, X). We want (L, Npoints).
-            # botm_chunk[:, yi_local, xi_local] works in Numpy
             botm = botm_chunk[:, yi_local, xi_local]
+
+            # Apply OOB mask to geometry
+            top[oob_mask] = np.nan
+            botm[:, oob_mask] = np.nan
 
             # Variable extraction
             vals = None
@@ -442,14 +460,20 @@ class NetcdfHandler:
                 var = self.ds.variables[variable_name]
                 if var.ndim == 4:
                      # (time, layer, y, x)
-                     # Read chunk for last time step
                      vals_chunk = var[-1, :, sl_y, sl_x]
-                     vals = vals_chunk[:, yi_local, xi_local]
+                     if isinstance(vals_chunk, np.ma.MaskedArray):
+                         vals_chunk = vals_chunk.filled(np.nan)
+                     vals = vals_chunk[:, yi_local, xi_local].astype(float)
                      
                 elif var.ndim == 3:
                      # (layer, y, x)
                      vals_chunk = var[:, sl_y, sl_x]
-                     vals = vals_chunk[:, yi_local, xi_local]
+                     if isinstance(vals_chunk, np.ma.MaskedArray):
+                         vals_chunk = vals_chunk.filled(np.nan)
+                     vals = vals_chunk[:, yi_local, xi_local].astype(float)
+                
+                if vals is not None:
+                    vals[:, oob_mask] = np.nan
             
             return {
                 "distances": distances,

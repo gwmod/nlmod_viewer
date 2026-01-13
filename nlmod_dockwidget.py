@@ -94,6 +94,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.plot_windows = {}  # Dictionary to track cross-section plot windows
         self.cs_geometries = {}  # Dictionary to store cross-section line geometries
         self.cs_rubber_bands = {}  # Dictionary to store QgsRubberBand for each CS
+        self.active_cs_id = None  # Track which CS is currently being edited/drawn
 
     def select_file(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -411,7 +412,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             canvas = self.iface.mapCanvas()
             self.xs_tool = CrossSectionMapTool(canvas)
             self.xs_tool.line_finished.connect(self.on_cross_section_finished)
+            self.xs_tool.points_changed.connect(self.on_cross_section_changed)
             canvas.setMapTool(self.xs_tool)
+            self.active_cs_id = None
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Tool Error", f"Failed to start tool: {e}")
 
@@ -477,10 +480,19 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.warning(self, "Error", data["error"])
                 return
                 
+            # Calculate cumulative distances for vertices
+            v_dists = [0.0]
+            curr_d = 0.0
+            for i in range(len(points)-1):
+                p1 = points[i]
+                p2 = points[i+1]
+                curr_d += ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2)**0.5
+                v_dists.append(curr_d)
+
             from .cross_section_plot import CrossSectionPlotWindow
             
             # Create Window
-            win = CrossSectionPlotWindow(data, var_name)
+            win = CrossSectionPlotWindow(data, var_name, vertex_distances=v_dists)
             win.show()
             
             # Add to List Manager
@@ -501,6 +513,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # Store
             self.plot_windows[item_id] = win
             self.cs_geometries[item_id] = points  # Store original points
+            self.active_cs_id = item_id
             
             # Create RubberBand for map visualization
             from qgis.gui import QgsRubberBand
@@ -510,6 +523,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             rubber_band = QgsRubberBand(self.iface.mapCanvas(), QgsWkbTypes.LineGeometry)
             rubber_band.setColor(QColor(255, 0, 0, 180))  # Red with transparency
             rubber_band.setWidth(3)
+            rubber_band.setLineStyle(QtCore.Qt.DashLine)
             
             for point in points:
                 rubber_band.addPoint(point)
@@ -524,6 +538,61 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Plot Error", f"Failed to plot: {e}")
 
+    def on_cross_section_changed(self, points):
+        """Update existing plot window when geometry is edited on map."""
+        if not self.active_cs_id or self.active_cs_id not in self.plot_windows:
+            return
+            
+        item_id = self.active_cs_id
+        win = self.plot_windows[item_id]
+        
+        # 1. Get variable name from plot window title or metadata
+        # Plot window title is "Cross Section: VarName"
+        var_name = win.windowTitle().replace("Cross Section: ", "")
+        
+        # 2. Transform points to Model CRS
+        try:
+            from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            model_crs_def = self.handler.get_crs()
+            model_crs = QgsCoordinateReferenceSystem(model_crs_def if model_crs_def else "EPSG:28992")
+            
+            if model_crs.isValid() and canvas_crs != model_crs:
+                xform = QgsCoordinateTransform(canvas_crs, model_crs, QgsProject.instance())
+                points = [xform.transform(p) for p in points]
+        except:
+            pass # Fallback to original points
+            
+        # 3. Extract new data
+        try:
+            data = self.handler.get_cross_section_data(var_name, points)
+            if not data or "error" in data:
+                return
+                
+            # 4. Refresh Plot Window
+            # Calculate vertex distances
+            v_dists = [0.0]
+            curr_d = 0.0
+            for i in range(len(points)-1):
+                p1 = points[i]
+                p2 = points[i+1]
+                curr_d += ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2)**0.5
+                v_dists.append(curr_d)
+
+            win.render_data(data, vertex_distances=v_dists)
+            
+            # 5. Update persistent rubber band and geometry
+            self.cs_geometries[item_id] = points
+            if item_id in self.cs_rubber_bands:
+                rb = self.cs_rubber_bands[item_id]
+                rb.reset()
+                for p in points:
+                    rb.addPoint(p)
+                rb.show()
+                
+        except Exception as e:
+            print(f"Error updating cross-section: {e}")
+
     def raise_cross_section_window(self, item):
         from qgis.PyQt.QtGui import QColor
         
@@ -535,6 +604,25 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win.show()
             win.raise_()
             win.activateWindow()
+            self.active_cs_id = item_id
+            
+            # If the tool is currently active, load these points into it
+            if hasattr(self, 'xs_tool') and self.iface.mapCanvas().mapTool() == self.xs_tool:
+                # We need the points in Canvas CRS for the tool
+                try:
+                    from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform
+                    canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+                    model_crs_def = self.handler.get_crs()
+                    model_crs = QgsCoordinateReferenceSystem(model_crs_def if model_crs_def else "EPSG:28992")
+                    
+                    points = self.cs_geometries[item_id]
+                    if model_crs.isValid() and canvas_crs != model_crs:
+                        xform = QgsCoordinateTransform(model_crs, canvas_crs, QgsProject.instance())
+                        points = [xform.transform(p) for p in points]
+                    
+                    self.xs_tool.set_points(points)
+                except:
+                    self.xs_tool.set_points(self.cs_geometries[item_id])
         
         # Highlight rubber band on map
         # Hide all other rubber bands and show only the selected one
