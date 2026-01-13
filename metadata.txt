@@ -1,0 +1,14 @@
+[general]
+name=NLMOD Inspector
+qgisMinimumVersion=3.0
+description=Inspect input and output of groundwater models built with nlmod (NetCDF).
+version=0.1
+author=Antigravity
+email=antigravity@example.com
+about=A plugin to read generic and nlmod-specific NetCDF files to inspect groundwater model data (structured and vertex grids).
+tracker=https://github.com/myrepo/issues
+repository=https://github.com/myrepo/
+icon=icons/icon.png
+category=Plugins
+changelog=
+    0.1: Initial basic version.
