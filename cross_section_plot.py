@@ -2,19 +2,39 @@ from qgis.PyQt import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 import numpy as np
 
-class CrossSectionPlotWindow(QtWidgets.QMainWindow):
-    def __init__(self, data, variable_name, parent=None, vertex_distances=None):
+class CrossSectionPlotWindow(QtWidgets.QDockWidget):
+    variable_changed = QtCore.pyqtSignal(str, str) # item_id, new_var_name
+    def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
+                 item_id=None, all_vars=None, data_fetcher=None, label="A", points=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Cross Section: {variable_name}")
-        self.resize(800, 400)
+        self.item_id = item_id # Store for signaling
+        self.data_fetcher = data_fetcher
+        self.all_vars = all_vars or [variable_name]
+        self.current_var = variable_name
+        self.cs_label = label
+        self.points = points
+        
+        self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
+        self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
         
         # Central Widget & Layout
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+        self.setWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
         
         # Tools Layout
         tools_layout = QtWidgets.QHBoxLayout()
+        
+        # Variable Selection
+        tools_layout.addWidget(QtWidgets.QLabel("Variable:"))
+        self.var_combo = QtWidgets.QComboBox()
+        self.var_combo.addItems(self.all_vars)
+        if self.current_var in self.all_vars:
+            self.var_combo.setCurrentText(self.current_var)
+        self.var_combo.currentTextChanged.connect(self.change_variable)
+        tools_layout.addWidget(self.var_combo)
+        
+        tools_layout.addSpacing(20)
         
         tools_layout.addWidget(QtWidgets.QLabel("Z-Range (m):"))
         
@@ -32,10 +52,6 @@ class CrossSectionPlotWindow(QtWidgets.QMainWindow):
         self.z_max_spin.valueChanged.connect(self.update_z_range)
         tools_layout.addWidget(self.z_max_spin)
         
-        self.reset_z_btn = QtWidgets.QPushButton("Reset to Data")
-        self.reset_z_btn.clicked.connect(self.reset_z_range)
-        tools_layout.addWidget(self.reset_z_btn)
-        
         # Spacer
         tools_layout.addSpacing(20)
         
@@ -44,27 +60,31 @@ class CrossSectionPlotWindow(QtWidgets.QMainWindow):
         
         self.v_min_spin = QtWidgets.QDoubleSpinBox()
         self.v_min_spin.setRange(-1e6, 1e6)
-        self.v_min_spin.setDecimals(2)
+        self.v_min_spin.setDecimals(4)
+        self.v_min_spin.valueChanged.connect(self.apply_data_range)
         tools_layout.addWidget(self.v_min_spin)
         
         tools_layout.addWidget(QtWidgets.QLabel(" to "))
         
         self.v_max_spin = QtWidgets.QDoubleSpinBox()
         self.v_max_spin.setRange(-1e6, 1e6)
-        self.v_max_spin.setDecimals(2)
+        self.v_max_spin.setDecimals(4)
+        self.v_max_spin.valueChanged.connect(self.apply_data_range)
         tools_layout.addWidget(self.v_max_spin)
         
-        self.apply_v_btn = QtWidgets.QPushButton("Apply")
-        self.apply_v_btn.clicked.connect(self.apply_data_range)
-        tools_layout.addWidget(self.apply_v_btn)
-        
         tools_layout.addStretch()
+        
+        self.reset_btn = QtWidgets.QPushButton("Reset to Data")
+        self.reset_btn.clicked.connect(self.reset_ranges)
+        tools_layout.addWidget(self.reset_btn)
+        
         layout.addLayout(tools_layout)
         
         # Store data for re-rendering
         self.data = data
         self.colorbar = None
         self.vertex_lines = []
+        self.vertex_distances = vertex_distances
         
         # Plot Widget
         self.plot_widget = pg.PlotWidget()
@@ -120,13 +140,36 @@ class CrossSectionPlotWindow(QtWidgets.QMainWindow):
         if z_max > z_min:
             self.plot_widget.setYRange(z_min, z_max)
 
-    def reset_z_range(self):
+    def reset_elevation_range(self):
         if hasattr(self, 'data_z_min'):
             margin = (self.data_z_max - self.data_z_min) * 0.1
             if margin == 0: margin = 1.0
             
+            self.z_min_spin.blockSignals(True)
+            self.z_max_spin.blockSignals(True)
             self.z_min_spin.setValue(self.data_z_min - margin)
             self.z_max_spin.setValue(self.data_z_max + margin)
+            self.z_min_spin.blockSignals(False)
+            self.z_max_spin.blockSignals(False)
+            self.update_z_range()
+
+    def reset_data_range(self):
+        valid_vals = self.data['values'][~np.isnan(self.data['values'])]
+        if len(valid_vals) > 0:
+            v_min = np.nanmin(valid_vals)
+            v_max = np.nanmax(valid_vals)
+            
+            self.v_min_spin.blockSignals(True)
+            self.v_max_spin.blockSignals(True)
+            self.v_min_spin.setValue(v_min)
+            self.v_max_spin.setValue(v_max)
+            self.v_min_spin.blockSignals(False)
+            self.v_max_spin.blockSignals(False)
+            self.apply_data_range()
+
+    def reset_ranges(self):
+        self.reset_elevation_range()
+        self.reset_data_range()
 
     def apply_data_range(self):
         v_min = self.v_min_spin.value()
@@ -134,6 +177,32 @@ class CrossSectionPlotWindow(QtWidgets.QMainWindow):
         if v_max > v_min:
             # Re-render with new limits
             self.render_data(self.data, v_min, v_max)
+
+    def change_variable(self, var_name):
+        if not self.data_fetcher:
+            return
+            
+        try:
+            # Fetch new data
+            new_data = self.data_fetcher(var_name, self.points)
+            if new_data:
+                self.data = new_data
+                self.current_var = var_name
+                self.setWindowTitle(f"Cross Section {self.cs_label}: {var_name}")
+                
+                # Re-render (using auto-range for the first time on new var)
+                if hasattr(self, '_first_render_done'):
+                    delattr(self, '_first_render_done')
+                
+                self.render_data(self.data, vertex_distances=self.vertex_distances)
+                # Keep Z range per user request
+                self.reset_data_range() 
+                
+                # Notify dock widget
+                if self.item_id:
+                    self.variable_changed.emit(self.item_id, var_name)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch data for {var_name}: {e}")
 
     def render_data(self, data, v_min=None, v_max=None, vertex_distances=None):
         # Clear previous items
