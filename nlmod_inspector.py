@@ -35,7 +35,7 @@ class NlmodInspector:
         """Run method that loads the dock widget."""
         if not self.dockwidget:
             self.dockwidget = NlmodDockWidget(self.iface.mainWindow(), self.iface)
-            # Add dock widget to left area (Qt.LeftDockWidgetArea = 0x1)
-            self.iface.addDockWidget(Qt.LeftDockWidgetArea, self.dockwidget)
+            # Add dock widget to right area
+            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dockwidget)
         
         self.dockwidget.show()

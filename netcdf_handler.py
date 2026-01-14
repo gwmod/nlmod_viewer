@@ -33,34 +33,51 @@ class NetcdfHandler:
 
     def detect_grid_type(self):
         # Heuristics for nlmod / UGRID / MODFLOW 6
-        # UGRID conventions often use specific topological variables
         keys = self.ds.variables.keys()
-        if 'mesh2d_face_nodes' in keys or 'face_nodes' in keys:
-            self.grid_type = "vertex"  # Unstructured
+        dims = self.ds.dimensions.keys()
+        
+        # 1. Explicit nlmod gridtype attribute
+        gridtype = getattr(self.ds, 'gridtype', None)
+        if not gridtype:
+            # Check variables for the attribute
+            for var in self.ds.variables.values():
+                gridtype = getattr(var, 'gridtype', None)
+                if gridtype: break
+        
+        if gridtype == 'vertex':
+            self.grid_type = "vertex"
+            return
+        elif gridtype == 'structured':
+            self.grid_type = "structured"
             return
 
-        # Check for structured dimensions
-        # nlmod structured often has x and y (1D) or x/y as dimensions
+        # 2. UGRID conventions
+        if 'mesh2d_face_nodes' in keys or 'face_nodes' in keys:
+            self.grid_type = "vertex"
+            return
+            
+        # 3. Check for icell2d (nlmod/MF6 vertex grid dimension)
+        if 'icell2d' in dims:
+            self.grid_type = "vertex"
+            return
+
+        # 4. Check for structured dimensions (x, y) or (row, column)
+        if 'x' in dims and 'y' in dims:
+            self.grid_type = "structured"
+            return
+        if 'row' in dims and 'column' in dims:
+            self.grid_type = "structured"
+            return
+            
+        # 5. Variable-based check for x/y coordinates
         if 'x' in keys and 'y' in keys:
             if self.ds.variables['x'].ndim == 1 and self.ds.variables['y'].ndim == 1:
                 self.grid_type = "structured"
                 return
         
-        # Check standard CF lat/lon
         if 'lat' in keys and 'lon' in keys:
              self.grid_type = "structured"
              return
-
-        # Fallback check on dimensions
-        dims = self.ds.dimensions.keys()
-        if 'x' in dims and 'y' in dims:
-            self.grid_type = "structured"
-            return
-            
-        # MODFLOW 6 Structured
-        if 'row' in dims and 'column' in dims:
-            self.grid_type = "structured"
-            return
             
         self.grid_type = "unknown"
 
@@ -75,7 +92,9 @@ class NetcdfHandler:
             'time', 'layer', 'lev', 'level',
             'mesh2d', 'mesh2d_face_nodes', 'mesh2d_edge_nodes', 
             'mesh2d_node_x', 'mesh2d_node_y', 'time_bnds',
-            'crs', 'grid_mapping', 'spatial_ref'
+            'crs', 'grid_mapping', 'spatial_ref',
+            # Vertex topology
+            'icvert', 'xv', 'yv', 'xc', 'yc', 'icell2d', 'icv', 'iv'
         }
         
         data_vars = []
@@ -145,14 +164,6 @@ class NetcdfHandler:
             import numpy as np
             from qgis.core import QgsMessageLog, Qgis
             
-            # Strategy 0: Check global attribute 'extent' (nlmod convention)
-            if hasattr(self.ds, 'extent'):
-                # Expected format: [xmin, xmax, ymin, ymax]
-                ext = self.ds.extent
-                if len(ext) == 4:
-                     QgsMessageLog.logMessage(f"NLMOD: Found extent via attribute: {ext}", "NlmodInspector", Qgis.Info)
-                     return tuple(ext)
-            
             x_var = None
             y_var = None
             
@@ -162,15 +173,10 @@ class NetcdfHandler:
                 if hasattr(var, 'coordinates'):
                     # e.g. "lat lon" or "y x"
                     coord_names = var.coordinates.split()
-                    # Try to identify which is X and which is Y
-                    # Heuristic: X usually has longer range/bounds or check attributes
                     if len(coord_names) >= 2:
                         candidates = [self.ds.variables[n] for n in coord_names if n in self.ds.variables]
-                        # Assign based on units or standard_name if possible
-                        # For now, simplistic: if one is 'x' or 'lon', use it.
                         x_cand = None
                         y_cand = None
-                        
                         for c in candidates:
                             c_name = c.name.lower()
                             std_name = getattr(c, 'standard_name', '').lower()
@@ -178,7 +184,6 @@ class NetcdfHandler:
                                 x_cand = c
                             if 'y' in c_name or 'lat' in c_name or 'projection_y_coordinate' in std_name:
                                 y_cand = c
-                        
                         if x_cand and y_cand:
                             x_var = x_cand
                             y_var = y_cand
@@ -209,10 +214,34 @@ class NetcdfHandler:
                         break
 
             if x_var is None or y_var is None:
+                # If we can't find coords but have extent attribute, use it as a last resort
+                if hasattr(self.ds, 'extent'):
+                    ext = self.ds.extent
+                    if len(ext) == 4:
+                         # For nlmod, if we only have extent, it's often South-to-North (Ascending)
+                         # Previous Hardcoded 'False' was reported as flipped.
+                         QgsMessageLog.logMessage(f"NLMOD: Found extent via attribute (no coords): {ext}. Defaulting Ascending=True", "NlmodInspector", Qgis.Info)
+                         return (ext[0], ext[1], ext[2], ext[3], True)
                 return None
-                
+            
+            # Use detected coords to determine direction
+            y_vals = y_var[:]
+            if len(y_vals) >= 2:
+                y_is_ascending = (y_vals[1] > y_vals[0])
+                QgsMessageLog.logMessage(f"NLMOD: Detected Y direction: {y_vals[0]} to {y_vals[-1]} (Ascending={y_is_ascending})", "NlmodInspector", Qgis.Info)
+            else:
+                y_is_ascending = False
+
+            # Check for global extent attribute for bounds
+            if hasattr(self.ds, 'extent'):
+                ext = self.ds.extent
+                if len(ext) == 4:
+                     QgsMessageLog.logMessage(f"NLMOD: Using global extent for bounds, Ascending={y_is_ascending}", "NlmodInspector", Qgis.Info)
+                     return (ext[0], ext[1], ext[2], ext[3], y_is_ascending)
+
+            # Otherwise calculate bounds from coords
             x = x_var[:]
-            y = y_var[:]
+            y = y_vals
             
             if len(x) < 2 or len(y) < 2:
                 QgsMessageLog.logMessage("NLMOD: Coordinate arrays too short.", "NlmodInspector", Qgis.Warning)
@@ -222,14 +251,13 @@ class NetcdfHandler:
             dx = np.abs(x[1] - x[0])
             dy = np.abs(y[1] - y[0])
             
-            # If simplistic uniform:
             # Min is center - dx/2
             xmin = np.min(x) - dx/2
             xmax = np.max(x) + dx/2
             ymin = np.min(y) - dy/2
             ymax = np.max(y) + dy/2
             
-            return (xmin, xmax, ymin, ymax)
+            return (xmin, xmax, ymin, ymax, y_is_ascending)
         except Exception as e:
             from qgis.core import QgsMessageLog, Qgis
             QgsMessageLog.logMessage(f"NLMOD: Error calculating extent: {e}", "NlmodInspector", Qgis.Critical)
@@ -369,119 +397,292 @@ class NetcdfHandler:
         ys = np.concatenate(ys_list)
         distances = np.concatenate(dist_list)
         
-        # 2. Get Coordinate Arrays (Assuming structured grid for now)
-        if self.grid_type != 'structured':
-            return None 
-            
+        # 2. Extract Data
         try:
-            x_var = self.ds.variables['x'][:]
-            y_var = self.ds.variables['y'][:]
-            
-            # Vectorized Nearest Neighbor Search
-            # Find closest index for each point in xs/ys
-            # Uses broadcasting: |coords[:, None] - points[None, :]|^2 minimized
-            # x_var is (Nx,), xs is (Npoints,)
-            # We want index for each point.
-            
-            # Optimization: If sorted, use searchsorted.
-            # Check sort order
-            is_sorted_x = (x_var[-1] > x_var[0])
-            is_sorted_y = (y_var[-1] > y_var[0])
-            
-            if is_sorted_x:
-                xi = np.searchsorted(x_var, xs)
-                xi = np.clip(xi, 0, len(x_var)-1)
-                # Fix nearest: check neighbors
-                # (searchsorted gives insertion point i where a[i-1] <= v < a[i])
-                # We need closer of i-1 or i
-                # Simplified: abs argmin is robust but potentially slower. 
-                # Given small N (100) and reasonable grid size, abs argmin is fine.
-                pass
-            
-            # Robust ABS Argmin (works for ascending, descending, or unordered)
-            # Memory usage: GridDim * NumPoints * float64. 
-            # E.g. 5000 * 100 * 8 = 4MB. Safe.
-            xi = np.abs(x_var[:, None] - xs[None, :]).argmin(axis=0)
-            yi = np.abs(y_var[:, None] - ys[None, :]).argmin(axis=0)
-
-            # Identify out-of-bounds points
-            x_min_val, x_max_val = np.min(x_var), np.max(x_var)
-            y_min_val, y_max_val = np.min(y_var), np.max(y_var)
-            
-            # Allow for half a cell margin (approximate)
-            dx = np.abs(x_var[1] - x_var[0]) if len(x_var) > 1 else 1.0
-            dy = np.abs(y_var[1] - y_var[0]) if len(y_var) > 1 else 1.0
-            
-            oob_mask = (xs < x_min_val - dx/2) | (xs > x_max_val + dx/2) | \
-                       (ys < y_min_val - dy/2) | (ys > y_max_val + dy/2)
-
-            # 3. Extract Data (Bounding Box Optimization)
-            # Instead of looping or reading fully, read the bounding range
-            x_min_idx, x_max_idx = xi.min(), xi.max()
-            y_min_idx, y_max_idx = yi.min(), yi.max()
-            
-            # Slices (inclusive end for numpy slice requires +1)
-            sl_y = slice(y_min_idx, y_max_idx + 1)
-            sl_x = slice(x_min_idx, x_max_idx + 1)
-            
-            # Local indices relative to the chunk
-            xi_local = xi - x_min_idx
-            yi_local = yi - y_min_idx
-            
-            # Check if variables exist
-            if 'top' not in self.ds.variables or 'botm' not in self.ds.variables:
-                return {"error": "Dataset missing 'top' or 'botm'."}
-
-            # Read chunks and handle MaskedArrays
-            def get_data(varname, slice_obj=None):
-                var = self.ds.variables[varname]
-                if slice_obj:
-                    data = var[slice_obj]
-                else:
-                    data = var[:]
-                if isinstance(data, np.ma.MaskedArray):
-                    return data.filled(np.nan)
-                return data.astype(float)
-
-            # Extract top and botm
-            top_chunk = get_data('top', (sl_y, sl_x))
-            botm_chunk = get_data('botm', (slice(None), sl_y, sl_x))
-            
-            top = top_chunk[yi_local, xi_local]
-            botm = botm_chunk[:, yi_local, xi_local]
-
-            # Apply OOB mask to geometry
-            top[oob_mask] = np.nan
-            botm[:, oob_mask] = np.nan
-
-            # Variable extraction
-            vals = None
-            if variable_name:
-                var = self.ds.variables[variable_name]
-                if var.ndim == 4:
-                     # (time, layer, y, x)
-                     vals_chunk = var[-1, :, sl_y, sl_x]
-                     if isinstance(vals_chunk, np.ma.MaskedArray):
-                         vals_chunk = vals_chunk.filled(np.nan)
-                     vals = vals_chunk[:, yi_local, xi_local].astype(float)
-                     
-                elif var.ndim == 3:
-                     # (layer, y, x)
-                     vals_chunk = var[:, sl_y, sl_x]
-                     if isinstance(vals_chunk, np.ma.MaskedArray):
-                         vals_chunk = vals_chunk.filled(np.nan)
-                     vals = vals_chunk[:, yi_local, xi_local].astype(float)
+            if self.grid_type == 'structured':
+                x_var = self.ds.variables['x'][:]
+                y_var = self.ds.variables['y'][:]
                 
-                if vals is not None:
-                    vals[:, oob_mask] = np.nan
+                # Robust ABS Argmin
+                xi = np.abs(x_var[:, None] - xs[None, :]).argmin(axis=0)
+                yi = np.abs(y_var[:, None] - ys[None, :]).argmin(axis=0)
+
+                # Identify out-of-bounds points
+                x_min_val, x_max_val = np.min(x_var), np.max(x_var)
+                y_min_val, y_max_val = np.min(y_var), np.max(y_var)
+                dx = np.abs(x_var[1] - x_var[0]) if len(x_var) > 1 else 1.0
+                dy = np.abs(y_var[1] - y_var[0]) if len(y_var) > 1 else 1.0
+                
+                oob_mask = (xs < x_min_val - dx/2) | (xs > x_max_val + dx/2) | \
+                           (ys < y_min_val - dy/2) | (ys > y_max_val + dy/2)
+
+                x_min_idx, x_max_idx = xi.min(), xi.max()
+                y_min_idx, y_max_idx = yi.min(), yi.max()
+                sl_y = slice(y_min_idx, y_max_idx + 1)
+                sl_x = slice(x_min_idx, x_max_idx + 1)
+                xi_local = xi - x_min_idx
+                yi_local = yi - y_min_idx
+                
+                def get_data(varname, slice_obj=None):
+                    var = self.ds.variables[varname]
+                    if slice_obj: data = var[slice_obj]
+                    else: data = var[:]
+                    if isinstance(data, np.ma.MaskedArray): return data.filled(np.nan)
+                    return data.astype(float)
+
+                top_chunk = get_data('top', (sl_y, sl_x))
+                botm_chunk = get_data('botm', (slice(None), sl_y, sl_x))
+                top = top_chunk[yi_local, xi_local]
+                botm = botm_chunk[:, yi_local, xi_local]
+                
+                vals = None
+                if variable_name:
+                    var = self.ds.variables[variable_name]
+                    if var.ndim == 4:
+                         vals_chunk = get_data(variable_name, (-1, slice(None), sl_y, sl_x))
+                         vals = vals_chunk[:, yi_local, xi_local]
+                    elif var.ndim == 3:
+                         vals_chunk = get_data(variable_name, (slice(None), sl_y, sl_x))
+                         vals = vals_chunk[:, yi_local, xi_local]
+
+            elif self.grid_type == 'vertex':
+                # Vertex/Unstructured grid support
+                if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
+                    xc = self.ds.variables['xc'][:]
+                    yc = self.ds.variables['yc'][:]
+                else:
+                    # Calculate centroids from vertices
+                    if 'icvert' not in self.ds.variables or 'xv' not in self.ds.variables or 'yv' not in self.ds.variables:
+                        return {"error": "Vertex grid missing topology (icvert/xv/yv)"}
+                    
+                    icvert = self.ds.variables['icvert'][:]
+                    xv = self.ds.variables['xv'][:]
+                    yv = self.ds.variables['yv'][:]
+                    
+                    # icvert is (icell2d, icv). Nodata values should be ignored.
+                    nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+                    
+                    # Calculate mean of valid vertices for each cell
+                    xc = np.full(icvert.shape[0], np.nan)
+                    yc = np.full(icvert.shape[0], np.nan)
+                    
+                    for i in range(icvert.shape[0]):
+                        v_idx = icvert[i]
+                        valid = v_idx[v_idx != nodata]
+                        if len(valid) > 0:
+                            xc[i] = np.mean(xv[valid])
+                            yc[i] = np.mean(yv[valid])
+                
+                # Nearest neighbor search (Centroids to Cross-section points)
+                # Compute distance matrix between centroids (Ncells) and points (Npoints)
+                # This could be memory intensive for huge grids, but is robust.
+                # Optimized version: find index of min distance
+                indices = []
+                for p_idx in range(len(xs)):
+                    d2 = (xc - xs[p_idx])**2 + (yc - ys[p_idx])**2
+                    indices.append(np.nanargmin(d2))
+                indices = np.array(indices)
+                
+                def get_data(varname):
+                    var = self.ds.variables[varname]
+                    data = var[:]
+                    if isinstance(data, np.ma.MaskedArray): return data.filled(np.nan)
+                    return data.astype(float)
+
+                top_all = get_data('top')
+                botm_all = get_data('botm')
+                
+                top = top_all[indices]
+                botm = botm_all[:, indices]
+                
+                vals = None
+                if variable_name:
+                    var = self.ds.variables[variable_name]
+                    data_all = get_data(variable_name)
+                    if data_all.ndim == 3: # (time, layer, icell2d)
+                        vals = data_all[-1, :, indices]
+                    elif data_all.ndim == 2: # (layer, icell2d)
+                        vals = data_all[:, indices]
+                
+                # OOB mask for vertex grid (if too far from any centroid, but argmin always finds one)
+                # We can check a threshold distance or use the min/max of centroids
+                x_min_val, x_max_val = np.nanmin(xc), np.nanmax(xc)
+                y_min_val, y_max_val = np.nanmin(yc), np.nanmax(yc)
+                # Use a larger buffer for vertex grids as cells are often irregular
+                dx = (x_max_val - x_min_val) / np.sqrt(len(xc))
+                dy = (y_max_val - y_min_val) / np.sqrt(len(yc))
+                oob_mask = (xs < x_min_val - dx) | (xs > x_max_val + dx) | \
+                           (ys < y_min_val - dy) | (ys > y_max_val + dy)
+
+            else:
+                return {"error": f"Unsupported or unknown grid type: {self.grid_type}"}
+
+            # Final check / Apply OOB
+            if top is not None:
+                top[oob_mask] = np.nan
+            if botm is not None:
+                botm[:, oob_mask] = np.nan
+            if vals is not None:
+                vals[:, oob_mask] = np.nan
             
             return {
                 "distances": distances,
                 "top": top,
                 "botm": botm,
                 "values": vals,
-                "num_layers": botm.shape[0]
+                "num_layers": botm.shape[0] if botm is not None else 0
             }
 
         except Exception as e:
             return {"error": str(e)}
+
+    def export_to_mesh(self, var_name, layer_idx=0, output_path=None):
+        """
+        Exports a single variable (at a specific layer) to a clean UGRID NetCDF file.
+        This provides maximal compatibility with MDAL.
+        """
+        if not self.ds or var_name not in self.ds.variables:
+            return False, "Variable not found"
+            
+        try:
+            import netCDF4
+            import numpy as np
+            
+            # 1. Prepare data slice
+            var = self.ds.variables[var_name]
+            data = None
+            
+            # Determine dimensions and slice
+            # Expected dims for vertex grid: (time, layer, icell2d) or (layer, icell2d) or (icell2d)
+            if 'icell2d' not in var.dimensions:
+                return False, f"Variable {var_name} does not have icell2d dimension."
+                
+            ic_idx = var.dimensions.index('icell2d')
+            
+            if var.ndim == 1:
+                data = var[:]
+            elif var.ndim == 2:
+                # Assume (layer, icell2d) or (time, icell2d)
+                # Slice by layer_idx
+                if ic_idx == 1:
+                    data = var[layer_idx, :]
+                else:
+                    data = var[:, layer_idx]
+            elif var.ndim == 3:
+                # Assume (time, layer, icell2d) - slice to last time, selected layer
+                if var.dimensions == ('time', 'layer', 'icell2d'):
+                    data = var[-1, layer_idx, :]
+                else:
+                    # Fallback slice
+                    data = var.chunk() # Not sure of generic slice, use simple approach
+                    sl = [slice(None)] * var.ndim
+                    sl[1] = layer_idx # layer usually 2nd
+                    sl[0] = -1 # time usually 1st
+                    data = var[tuple(sl)]
+            
+            if data is None:
+                return False, "Unsupported variable dimensions"
+
+            # 2. Create new NetCDF
+            out_ds = netCDF4.Dataset(output_path, 'w', format='NETCDF4')
+            
+            # Copy topology variables and dimensions
+            # We need icell2d and nvertex (from icvert)
+            icert_in = self.ds.variables.get('icvert')
+            if icert_in is None:
+                return False, "icvert (topology) not found in source"
+                
+            n_cells = self.ds.dimensions['icell2d'].size
+            n_vert_per_cell = icert_in.shape[1]
+            
+            out_ds.createDimension('icell2d', n_cells)
+            out_ds.createDimension('nvertex', n_vert_per_cell)
+            
+            # Create icvert
+            icv_out = out_ds.createVariable('icvert', icert_in.dtype, ('icell2d', 'nvertex'))
+            icv_out[:] = icert_in[:]
+            icv_out.cf_role = "face_node_connectivity"
+            icv_out.start_index = 0
+            nodata = getattr(icert_in, 'nodata', -1)
+            
+            # Vertices
+            xv_in = self.ds.variables.get('xv')
+            yv_in = self.ds.variables.get('yv')
+            if xv_in is not None and yv_in is not None:
+                n_node = self.ds.dimensions.get('nnode', self.ds.dimensions.get('node', None))
+                if not n_node:
+                    out_ds.createDimension('nnode', len(xv_in))
+                else:
+                    out_ds.createDimension('nnode', n_node.size)
+                    
+                xv_out = out_ds.createVariable('xv', 'f4', ('nnode',))
+                yv_out = out_ds.createVariable('yv', 'f4', ('nnode',))
+                xv_out[:] = xv_in[:]
+                yv_out[:] = yv_in[:]
+                xv_out.standard_name = "projection_x_coordinate"
+                yv_out.standard_name = "projection_y_coordinate"
+                xv_out.units = "m"
+                yv_out.units = "m"
+
+            # Centroids (xc, yc) - Calculated if missing
+            xc_in = self.ds.variables.get('xc')
+            yc_in = self.ds.variables.get('yc')
+            
+            if xc_in is not None and yc_in is not None:
+                xc_vals = xc_in[:]
+                yc_vals = yc_in[:]
+            else:
+                # Calculate
+                xv_data = xv_in[:]
+                yv_data = yv_in[:]
+                icv_data = icert_in[:]
+                nodata = getattr(icert_in, 'nodata', -1)
+                xc_vals = np.full(n_cells, np.nan)
+                yc_vals = np.full(n_cells, np.nan)
+                for i in range(n_cells):
+                    v_idx = icv_data[i]
+                    valid = v_idx[v_idx != nodata]
+                    if len(valid) > 0:
+                        xc_vals[i] = np.mean(xv_data[valid])
+                        yc_vals[i] = np.mean(yv_data[valid])
+            
+            xc_out = out_ds.createVariable('xc', 'f4', ('icell2d',))
+            yc_out = out_ds.createVariable('yc', 'f4', ('icell2d',))
+            xc_out[:] = xc_vals
+            yc_out[:] = yc_vals
+            xc_out.standard_name = "projection_x_coordinate"
+            yc_out.standard_name = "projection_y_coordinate"
+            xc_out.units = "m"
+            yc_out.units = "m"
+
+            # Mesh Topology variable
+            mesh_v = out_ds.createVariable('mesh2d', 'i4')
+            mesh_v.cf_role = "mesh_topology"
+            mesh_v.topology_dimension = 2
+            mesh_v.face_node_connectivity = "icvert"
+            mesh_v.node_coordinates = "xv yv"
+            mesh_v.face_dimension = "icell2d"
+            mesh_v.face_coordinates = "xc yc"
+            if nodata != -1:
+                mesh_v.face_node_connectivity_filler_value = nodata
+
+            # The Data Variable
+            data_v = out_ds.createVariable(var_name, 'f4', ('icell2d',))
+            # Handle masked arrays
+            if isinstance(data, np.ma.MaskedArray):
+                data_v[:] = data.filled(np.nan)
+            else:
+                data_v[:] = data
+                
+            data_v.mesh = "mesh2d"
+            data_v.location = "face"
+            data_v.standard_name = var_name
+            
+            out_ds.Conventions = "UGRID-1.0"
+            out_ds.close()
+            
+            return True, ""
+            
+        except Exception as e:
+            import traceback
+            return False, f"Export failed: {str(e)}\n{traceback.format_exc()}"

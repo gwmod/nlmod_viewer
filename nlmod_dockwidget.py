@@ -2,10 +2,12 @@ from qgis.PyQt import QtWidgets, QtCore
 from qgis.core import (
     QgsProject, QgsMeshLayer, QgsRasterLayer, QgsCoordinateReferenceSystem,
     QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsStyle, QgsRasterShader,
-    QgsRasterBandStats
+    QgsRasterBandStats, QgsMessageLog, Qgis, QgsGradientColorRamp,
+    QgsMeshRendererScalarSettings, QgsMeshDatasetIndex, QgsMeshRendererSettings
 )
 from .netcdf_handler import NetcdfHandler
 import os
+import tempfile
 
 class NlmodDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None, iface=None):
@@ -177,20 +179,42 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         use_mesh = self.use_mesh_chk.isChecked() or (grid_type == "vertex")
         
         if use_mesh:
-            # For unstructured grids or forced mesh, use MDAL
-            layer_name = f"{base_name} (Mesh)"
-            layer = QgsMeshLayer(filepath, layer_name, "mdal")
+            
+            # For vertex grids, export to a dedicated clean UGRID file
+            # This solves MDAL's identification issues with complex multi-var files
+            layer_idx = 0
+            if self.layer_combo.isEnabled():
+                layer_idx = self.layer_combo.currentIndex()
+            
+            # Create a descriptive temp filename
+            temp_dir = tempfile.gettempdir()
+            clean_var = "".join(x for x in var_name if x.isalnum())
+            temp_path = os.path.join(temp_dir, f"nlmod_{clean_var}_L{layer_idx+1}.nc")
+            
+            QgsMessageLog.logMessage(f"NLMOD: Exporting mesh to {temp_path}", "NlmodInspector", Qgis.Info)
+            
+            success, msg = self.handler.export_to_mesh(var_name, layer_idx, temp_path)
+            
+            if not success:
+                QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export mesh: {msg}")
+                return
+            
+            layer_name = f"{base_name} - {var_name} (L{layer_idx+1})"
+            layer = QgsMeshLayer(temp_path, layer_name, "mdal")
             
             if layer.isValid():
                 if not layer.crs().isValid():
                     layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+                
+                # Apply Turbo styling for Mesh
+                self.style_mesh_layer(layer)
+                
                 QgsProject.instance().addMapLayer(layer)
-                self.activate_mesh_dataset(layer, var_name)
+                QgsMessageLog.logMessage(f"NLMOD: Successfully loaded mesh layer for {var_name}", "NlmodInspector", Qgis.Info)
             else:
-                QtWidgets.QMessageBox.warning(self, "Error", "Failed to load as Mesh Layer.")
+                QtWidgets.QMessageBox.warning(self, "Error", "Failed to load the exported mesh file in QGIS.")
 
         elif grid_type == "structured":
-            from qgis.core import QgsMessageLog, Qgis
             QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NlmodInspector", Qgis.Info)
             
             # Try loading as Raster (NetCDF)
@@ -215,70 +239,64 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             try:
                 extent = self.handler.get_extent(var_name)
                 if extent:
-                    from qgis.core import QgsMessageLog, Qgis
-                    xmin, xmax, ymin, ymax = extent
-                    QgsMessageLog.logMessage(f"NLMOD: Calculated extent: {xmin},{xmax},{ymin},{ymax}", "NlmodInspector", Qgis.Info)
+                    xmin, xmax, ymin, ymax, y_is_ascending = extent
+                    QgsMessageLog.logMessage(f"NLMOD: Using gdal.Translate with bounds: {xmin, ymin, xmax, ymax}", "NlmodInspector", Qgis.Info)
                     
-                    # Prepare VRT metadata
-                    # Dimensions
-                    # We need actual pixel dimensions
-                    var_info = self.handler.ds.variables[var_name]
-                    # Shape is typically (layer, y, x) or (y,x) or (time, layer, y, x)
-                    # We need the last two dimensions
-                    if var_info.ndim >= 2:
-                        y_size = var_info.shape[-2]
-                        x_size = var_info.shape[-1]
+                    from osgeo import gdal
+                    # Open the subdataset directly
+                    subdataset_uri = f'NETCDF:"{safe_path}":{var_name}'
+                    ds = gdal.Open(subdataset_uri)
+                    if ds:
+                        # Use gdal.Translate to create a corrected VRT
+                        # outputBounds is [ulx, uly, lrx, lry]
+                        # By specifying [xmin, ymin, xmax, ymax], we force a standard North-Up orientation.
+                        # GDAL will automatically handle any necessary flipping of the source data.
+                        vrt_ds = gdal.Translate('', ds, format='VRT', 
+                                                outputBounds=[xmin, ymin, xmax, ymax], 
+                                                bandList=[band_idx])
                         
-                        # Calculate GeoTransform
-                        # GT = [top_left_x, w_pixel_val, rotation_x, top_left_y, rotation_y, h_pixel_val]
-                        # pixel width = (xmax - xmin) / x_size
-                        # pixel height = (ymin - ymax) / y_size  (negative usually)
-                        
-                        pixel_width = (xmax - xmin) / x_size
-                        pixel_height = (ymax - ymin) / y_size # Note: ymin is bottom, ymax is top. (ymax - ymin) -> positive height? 
-                        # Usually GT[5] is negative for north-up images.
-                        # If ymax is top: GT[3] = ymax. GT[5] = (ymin - ymax) / y_size = NEGATIVE
-                        
-                        gt_5 = (ymin - ymax) / y_size
-                        
-                        geotransform = f"{xmin}, {pixel_width}, 0, {ymax}, 0, {gt_5}"
-                        
-                        # CRS
-                        crs_wkt = self.handler.get_crs()
-                        if not crs_wkt:
-                             crs_wkt = "EPSG:28992" # Fallback
-                             
-                        # Build VRT XML manually - USE SELECTED BAND
-                        vrt_xml = f"""<VRTDataset rasterXSize="{x_size}" rasterYSize="{y_size}">
-  <SRS>{crs_wkt}</SRS>
-  <GeoTransform>{geotransform}</GeoTransform>
-  <VRTRasterBand dataType="Float32" band="1">
-    <SimpleSource>
-      <SourceFilename relativeToVRT="0">NETCDF:"{safe_path}":{var_name}</SourceFilename>
-      <SourceBand>{band_idx}</SourceBand>
-      <SrcRect xOff="0" yOff="0" xSize="{x_size}" ySize="{y_size}" />
-      <DstRect xOff="0" yOff="0" xSize="{x_size}" ySize="{y_size}" />
-    </SimpleSource>
-  </VRTRasterBand>
-</VRTDataset>"""
+                        if vrt_ds:
+                            vrt_xml = vrt_ds.GetMetadata('xml:VRT')[0]
+                            vrt_ds = None # Close
+                            
+                            # If Y is ascending (South-to-North), we need to flip the source rectangle in the VRT
+                            if y_is_ascending:
+                                # We need to find <SrcRect xOff="0" yOff="0" xSize="W" ySize="H" />
+                                # and change it to <SrcRect xOff="0" yOff="H" xSize="W" ySize="-H" />
+                                import re
+                                # Find yOff="0" and replace with yOff="{y_size}"
+                                # Find ySize="{y_size}" and replace with ySize="-{y_size}"
+                                # We can get y_size from the VRT XML itself or use the variable info
+                                var_info = self.handler.ds.variables[var_name]
+                                y_size = var_info.shape[-2] if var_info.ndim >= 2 else 0
+                                if y_size > 0:
+                                    vrt_xml = vrt_xml.replace('yOff="0"', f'yOff="{y_size}"')
+                                    vrt_xml = vrt_xml.replace(f'ySize="{y_size}"', f'ySize="-{y_size}"')
+                                    QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NlmodInspector", Qgis.Info)
+                        else:
+                            QgsMessageLog.logMessage("NLMOD: gdal.Translate failed to create VRT.", "NlmodInspector", Qgis.Warning)
+                            raise Exception("gdal.Translate failed")
+                        ds = None
+                    else:
+                        QgsMessageLog.logMessage(f"NLMOD: Could not open subdataset {subdataset_uri}", "NlmodInspector", Qgis.Warning)
+                        raise Exception("Could not open subdataset")
 
-                        # Save to vsimem (or temporary file if vsimem assumes path)
-                        # QgsRasterLayer takes a path. 
-                        # We can pass the XML content directly? No, usually needs a path.
-                        # But we can write to /vsimem/
-                        from osgeo import gdal
-                        vrt_mem_path = f"/vsimem/{var_name}_{band_idx}_{id(self)}.vrt"
-                        gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
-                        
-                        uri = vrt_mem_path
-                        QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri} for band {band_idx}", "NlmodInspector", Qgis.Info)
+                    # Save to vsimem (or temporary file if vsimem assumes path)
+                    # QgsRasterLayer takes a path. 
+                    # We can pass the XML content directly? No, usually needs a path.
+                    # But we can write to /vsimem/
+                    from osgeo import gdal
+                    vrt_mem_path = f"/vsimem/{var_name}_{band_idx}_{id(self)}.vrt"
+                    gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
+                    
+                    uri = vrt_mem_path
+                    QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri} for band {band_idx}", "NlmodInspector", Qgis.Info)
                 else:
                      QgsMessageLog.logMessage(f"NLMOD: Extent not found for {var_name}", "NlmodInspector", Qgis.Warning)
 
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
-                from qgis.core import QgsMessageLog, Qgis
                 QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}\n{tb}", "NlmodInspector", Qgis.Warning)
             # ------------------------------------
 
@@ -298,7 +316,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         ramp = style.colorRamp(name)
                         if not ramp:
                             # Create a simple gradient if not found
-                            from qgis.core import QgsGradientColorRamp
                             from qgis.PyQt.QtGui import QColor
                             return QgsGradientColorRamp(QColor(default_colors[0]), QColor(default_colors[1]))
                         return ramp
@@ -351,31 +368,132 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
                     QgsProject.instance().addMapLayer(layer)
                     self.activate_mesh_dataset(layer, var_name)
+                    self.style_mesh_layer(layer)
                 else:
                     QtWidgets.QMessageBox.warning(self, "Error", f"Failed to load variable '{var_name}'.")
         else:
-             # Unknown grid, try Mesh
-             layer = QgsMeshLayer(filepath, base_name, "mdal")
-             if layer.isValid():
-                 if not layer.crs().isValid():
-                     layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
-                 QgsProject.instance().addMapLayer(layer)
-             else:
-                 QtWidgets.QMessageBox.warning(self, "Error", "Could not load file.")
+            # Unknown grid, try Mesh
+            layer = QgsMeshLayer(filepath, base_name, "mdal")
+            if layer.isValid():
+                if not layer.crs().isValid():
+                    layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+                
+                QgsProject.instance().addMapLayer(layer)
+                self.activate_mesh_dataset(layer, var_name)
+                self.style_mesh_layer(layer)
+            else:
+                QtWidgets.QMessageBox.warning(self, "Error", "Could not load file.")
+
+
+    def style_mesh_layer(self, layer):
+        """Applies the Turbo colormap to a mesh layer's active scalar dataset."""
+        try:
+            # 1. Get Turbo Ramp
+            def get_ramp(name, default_colors):
+                style = QgsStyle.defaultStyle()
+                ramp = style.colorRamp(name)
+                if not ramp:
+                    return QgsGradientColorRamp(QColor(default_colors[0]), QColor(default_colors[1]))
+                return ramp
+
+            from qgis.PyQt.QtGui import QColor
+            from qgis.core import QgsMeshRendererScalarSettings
+            ramp = get_ramp("Turbo", ["blue", "red"])
+            if not ramp: return
+
+            # 2. Get active dataset group index
+            # Explicit cast to int is required for some PyQGIS versions to prevent type errors
+            idx = int(layer.rendererSettings().activeScalarDatasetGroup())
+            if idx < 0: 
+                # If nothing active, try finding one or default to 0
+                if layer.datasetGroupCount() > 0:
+                    idx = 0
+                else:
+                    return
+            
+            # 3. Get bounds for shader
+            # Using dataProvider is often more robust for metadata in PyQGIS
+            provider = layer.dataProvider()
+            if provider:
+                meta = provider.datasetGroupMetadata(idx)
+            else:
+                meta = layer.datasetGroupMetadata(idx)
+            
+            # Robustly try to get min/max from metadata (method names vary by QGIS version)
+            min_val = 0.0
+            max_val = 1.0
+            
+            if hasattr(meta, 'minimumValue'):
+                min_val = meta.minimumValue()
+                max_val = meta.maximumValue()
+            elif hasattr(meta, 'statistic'):
+                # 0 = Minimum, 1 = Maximum
+                try:
+                    min_val = meta.statistic(0)
+                    max_val = meta.statistic(1)
+                except:
+                    pass
+            elif hasattr(meta, 'minimum'):
+                min_val = meta.minimum()
+                max_val = meta.maximum()
+            
+            if min_val >= max_val:
+                min_val -= 1.0
+                max_val += 1.0
+
+            # 4. Create Shader
+            shader = QgsColorRampShader(min_val, max_val)
+            shader.setColorRampType(QgsColorRampShader.Interpolated)
+            shader.setSourceColorRamp(ramp)
+            # MDAL doesn't have classifyColorRamp directly on shader in the same way 
+            # as raster data provider, so we manually build items if needed 
+            # OR just set the ramp and QGIS often handles it if we set discrete/interpolated.
+            # Actually fcn.classifyColorRamp(...) is on QgsColorRampShader.
+            # But MDAL renderer might prefer a full ramp list.
+            
+            items = []
+            steps = 10
+            for i in range(steps):
+                v = min_val + (max_val - min_val) * i / (steps - 1)
+                color = ramp.color(i / (steps - 1))
+                items.append(QgsColorRampShader.ColorRampItem(v, color, f"{v:.4g}"))
+            shader.setColorRampItemList(items)
+
+            # 5. Apply to Mesh Settings
+            settings = layer.rendererSettings()
+            scalar_settings = settings.scalarSettings(idx)
+            scalar_settings.setColorRampShader(shader)
+            
+            # Ensure it is enabled (method name/existence varies)
+            if hasattr(scalar_settings, 'setEnabled'):
+                scalar_settings.setEnabled(True)
+                
+            # Set to interpolated (method name/existence varies)
+            if hasattr(scalar_settings, 'setDataResamplingMethod'):
+                # Resampling methods: 0=None, 1=Neighbor, 2=Linear
+                # Setting to 0 (None) by default as requested.
+                scalar_settings.setDataResamplingMethod(0)
+            
+            settings.setScalarSettings(idx, scalar_settings)
+            layer.setRendererSettings(settings)
+            layer.triggerRepaint()
+
+        except Exception as e:
+            QgsMessageLog.logMessage(f"NLMOD: Mesh styling failed: {e}", "NlmodInspector", Qgis.Warning)
 
 
     def activate_mesh_dataset(self, layer, var_name):
-        # Helper to set the active dataset on the mesh layer if possible
-        # This iterates through dataset groups to find a match by name
+        """Sets the active scalar and vector dataset group by name."""
         count = layer.datasetGroupCount()
         for i in range(count):
             meta = layer.datasetGroupMetadata(i)
             if meta.name() == var_name:
-                # Set active scalar/vector dataset
-                # Note: this API changes slightly between QGIS versions, but generally:
-                # layer.setStaticLayer(False) # Enable temporal if needed
-                # For now just let the user see it's loaded.
+                settings = layer.rendererSettings()
+                settings.setActiveScalarDatasetGroup(i)
+                settings.setActiveVectorDatasetGroup(i)
+                layer.setRendererSettings(settings)
                 break
+
 
     def activate_cross_section_tool(self):
         # Check if a variable is selected and has layer dimension
