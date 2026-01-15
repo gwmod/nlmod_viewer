@@ -58,9 +58,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Buttons
         btn_layout = QtWidgets.QHBoxLayout()
-        self.use_mesh_chk = QtWidgets.QCheckBox("Load as Mesh Layer")
-        self.use_mesh_chk.setToolTip("Force usage of MDAL (Mesh) provider. Better for 3D/Unstructured data.")
-        btn_layout.addWidget(self.use_mesh_chk)
         self.load_btn = QtWidgets.QPushButton("Add to Map")
         self.load_btn.clicked.connect(self.add_layer)
         btn_layout.addWidget(self.load_btn)
@@ -99,7 +96,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.cs_rubber_bands = {}  # Dictionary to store QgsRubberBand for each CS
         self.active_cs_id = None  # Track which CS is currently being edited/drawn
         self.prev_map_tool = None # Store map tool before activation
-        self.cs_counter = 0  # To assign A, B, C...
 
     def select_file(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -119,15 +115,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not success:
              self.info_text.setText(f"Error opening file:\n{msg}")
              self.var_list.clear()
+             QtWidgets.QMessageBox.critical(self, "Open Error", msg)
              return
         
         self.info_text.setText(self.handler.get_info_text())
-        
-        # Auto-check mesh if vertex
-        if self.handler.grid_type == "vertex":
-            self.use_mesh_chk.setChecked(True)
-        else:
-            self.use_mesh_chk.setChecked(False)
             
         self.populate_vars()
 
@@ -178,8 +169,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         filepath = self.handler.filepath
         base_name = os.path.basename(filepath)
         
-        # Check explicit force mesh or vertex type
-        use_mesh = self.use_mesh_chk.isChecked() or (grid_type == "vertex")
+        # Vertex grids (quadtree, unstructured) always load as Mesh (MDAL)
+        # Structured grids always load as Raster (GDAL)
+        use_mesh = (grid_type == "vertex")
         
         if use_mesh:
             
@@ -621,10 +613,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             item_id = str(time.time())
             
             # Generate Letter Label (A, B, C...)
-            cs_label = chr(65 + (self.cs_counter % 26))
-            if self.cs_counter >= 26:
-                cs_label += str(self.cs_counter // 26)
-            self.cs_counter += 1
+            cs_label = self.get_next_cs_label()
             
             from .cross_section_plot import CrossSectionPlotWindow
             
@@ -836,7 +825,38 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         item_id = item.data(QtCore.Qt.UserRole)
         
         self.remove_cross_section_by_id(item_id)
+
+    def get_next_cs_label(self):
+        """Finds the next label based on Max(existing_labels) + 1."""
+        existing_labels = []
+        for win in self.plot_windows.values():
+            if hasattr(win, 'cs_label'):
+                existing_labels.append(win.cs_label)
         
-        # Remove from list
-        row = self.cs_list.row(item)
-        self.cs_list.takeItem(row)
+        if not existing_labels:
+            return "A"
+            
+        def label_to_int(lbl):
+            # Very simple A, B, C... Z, A1, B1... converter
+            # For now let's just handle A-Z for simplicity as requested
+            # If we need more, we can use a proper base-26 system
+            if len(lbl) == 1:
+                return ord(lbl) - ord('A')
+            try:
+                # Handle things like 'A1' etc if they exist
+                base = ord(lbl[0]) - ord('A')
+                suffix = int(lbl[1:])
+                return (suffix + 1) * 26 + base
+            except:
+                return 0
+
+        def int_to_label(val):
+            if val < 26:
+                return chr(ord('A') + val)
+            suffix = (val // 26) - 1
+            base = val % 26
+            return chr(ord('A') + base) + str(suffix + 1)
+
+        # Get the max integer representation
+        max_val = max(label_to_int(lbl) for lbl in existing_labels)
+        return int_to_label(max_val + 1)

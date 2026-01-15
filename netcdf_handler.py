@@ -19,6 +19,14 @@ class NetcdfHandler:
                 raise ImportError("netCDF4 module not found")
                 
             self.ds = netCDF4.Dataset(self.filepath, 'r')
+            
+            # Check for grid rotation (angrot)
+            angrot = getattr(self.ds, 'angrot', 0)
+            if angrot != 0:
+                self.ds.close()
+                self.ds = None
+                return False, f"Grid rotation detected (angrot={angrot}).\n\nModel datasets with grid rotation are not yet supported."
+
             self.detect_grid_type()
             return True, ""
         except ImportError:
@@ -444,6 +452,9 @@ class NetcdfHandler:
                     elif var.ndim == 3:
                          vals_chunk = get_data(variable_name, (slice(None), sl_y, sl_x))
                          vals = vals_chunk[:, yi_local, xi_local]
+                
+                # Store indices for flat plotting
+                indices = (yi, xi)
 
             elif self.grid_type == 'vertex':
                 # Vertex/Unstructured grid support
@@ -530,6 +541,7 @@ class NetcdfHandler:
                 "top": top,
                 "botm": botm,
                 "values": vals,
+                "indices": indices, # Add indices
                 "num_layers": botm.shape[0] if botm is not None else 0
             }
 

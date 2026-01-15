@@ -2,6 +2,28 @@ from qgis.PyQt import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 import numpy as np
 
+class SettingsDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, show_boundaries=False, plot_flat=False):
+        super().__init__(parent)
+        self.setWindowTitle("Cross Section Settings")
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        self.chk_boundaries = QtWidgets.QCheckBox("Show Layer Boundaries")
+        self.chk_boundaries.setChecked(show_boundaries)
+        layout.addWidget(self.chk_boundaries)
+        
+        self.chk_flat = QtWidgets.QCheckBox("Plot Flat Cells")
+        self.chk_flat.setChecked(plot_flat)
+        self.chk_flat.setToolTip("Renders cells as flat blocks instead of interpolating between centers.")
+        layout.addWidget(self.chk_flat)
+        
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal, self)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
 class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     variable_changed = QtCore.pyqtSignal(str, str) # item_id, new_var_name
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
@@ -13,6 +35,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.current_var = variable_name
         self.cs_label = label
         self.points = points
+        self.show_boundaries = False # Default to False
+        self.plot_flat = True # Default to True now
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -78,6 +102,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.reset_btn.clicked.connect(self.reset_ranges)
         tools_layout.addWidget(self.reset_btn)
         
+        # Settings Button
+        self.settings_btn = QtWidgets.QPushButton("Settings...")
+        self.settings_btn.clicked.connect(self.show_settings)
+        tools_layout.addWidget(self.settings_btn)
+        
         layout.addLayout(tools_layout)
         
         # Store data for re-rendering
@@ -100,7 +129,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         layout.addWidget(self.plot_widget)
         self.plot_widget.setLabel('left', 'Elevation', units='m', **styles)
         self.plot_widget.setLabel('bottom', 'Distance', units='m', **styles)
-        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.showGrid(x=False, y=False)
         
         # Render Data
         self.render_data(data, vertex_distances=vertex_distances)
@@ -178,6 +207,24 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             # Re-render with new limits
             self.render_data(self.data, v_min, v_max)
 
+    def show_settings(self):
+        dlg = SettingsDialog(self, show_boundaries=self.show_boundaries, plot_flat=self.plot_flat)
+        if dlg.exec_():
+            new_boundaries = dlg.chk_boundaries.isChecked()
+            new_flat = dlg.chk_flat.isChecked()
+            
+            changed = False
+            if new_boundaries != self.show_boundaries:
+                self.show_boundaries = new_boundaries
+                changed = True
+            if new_flat != self.plot_flat:
+                self.plot_flat = new_flat
+                changed = True
+                
+            if changed:
+                # Re-render
+                self.render_data(self.data, vertex_distances=self.vertex_distances)
+
     def change_variable(self, var_name):
         if not self.data_fetcher:
             return
@@ -250,7 +297,12 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self._first_render_done = True
             
         # Create Optimized Item
-        self.dataset_item = CrossSectionMeshItem(dists, top, botm, vals, cmap, (v_min, v_max))
+        self.dataset_item = CrossSectionMeshItem(
+            dists, top, botm, vals, cmap, (v_min, v_max), 
+            show_boundaries=self.show_boundaries,
+            plot_flat=self.plot_flat,
+            indices=data.get('indices') # Pass indices
+        )
         self.plot_widget.addItem(self.dataset_item)
         
         # Add Colorbar
@@ -277,7 +329,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 self.vertex_lines.append(line)
 
 class CrossSectionMeshItem(pg.GraphicsObject):
-    def __init__(self, dists, top, botm, vals, cmap, val_range=None):
+    def __init__(self, dists, top, botm, vals, cmap, val_range=None, 
+                 show_boundaries=False, plot_flat=False, indices=None):
         super().__init__()
         self.dists = dists
         self.top = top
@@ -285,6 +338,9 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         self.vals = vals
         self.cmap = cmap
         self.val_range_override = val_range
+        self.show_boundaries = show_boundaries
+        self.plot_flat = plot_flat
+        self.indices = indices
         self.picture = None
         self._generate_picture()
         
@@ -309,52 +365,112 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         num_layers = self.botm.shape[0]
         num_points = len(self.dists)
         
-        # Optimization: Quantize colors into bins (e.g. 256)
-        # Create a QPainterPath for each bin to minimize state changes
+        # Optimization: Quantize colors into bins
         n_bins = 256
         paths = [QtGui.QPainterPath() for _ in range(n_bins)]
         
-        # Iterate and assign to paths
-        # This python loop is still the heaviest part, but doing it once 
-        # to build paths is better than managing objects.
-        
-        for i in range(num_layers):
-            if i == 0: l_top = self.top
-            else: l_top = self.botm[i-1]
-            l_bot = self.botm[i]
-            
-            for j in range(num_points - 1):
-                 val = float(self.vals[i, j])
-                 if np.isnan(val): continue
-                 
-                 # Skip if geometry is NaN (Out of Domain)
-                 if np.isnan(l_top[j]) or np.isnan(l_top[j+1]) or \
-                    np.isnan(l_bot[j]) or np.isnan(l_bot[j+1]):
-                     continue
-                 
-                 # Bin index
-                 norm = (val - min_val) / val_range
-                 bin_idx = int(norm * (n_bins - 1))
-                 bin_idx = max(0, min(n_bins-1, bin_idx))
-                 
-                 # Add rect to path
-                 # Top Left, Top Right, Bottom Right, Bottom Left
-                 poly = QtGui.QPolygonF([
-                     QtCore.QPointF(self.dists[j], l_top[j]),
-                     QtCore.QPointF(self.dists[j+1], l_top[j+1]),
-                     QtCore.QPointF(self.dists[j+1], l_bot[j+1]),
-                     QtCore.QPointF(self.dists[j], l_bot[j])
-                 ])
-                 paths[bin_idx].addPolygon(poly)
-        
-        # Draw paths
         # Pre-calculate colors
         colors = [self.cmap.map(i / (n_bins - 1)) for i in range(n_bins)]
         
+        # Boundary line path
+        boundary_path = QtGui.QPainterPath() if self.show_boundaries else None
+
+        for i in range(num_layers):
+            if i == 0: l_top_all = self.top
+            else: l_top_all = self.botm[i-1]
+            l_bot_all = self.botm[i]
+            
+            j = 0
+            while j < num_points - 1:
+                # If flat plotting is requested AND we have indices
+                if self.plot_flat and self.indices is not None:
+                    # Find span of current cell
+                    if isinstance(self.indices, tuple): # structured (yi, xi)
+                        curr_idx = (self.indices[0][j], self.indices[1][j])
+                    else: # vertex
+                        curr_idx = self.indices[j]
+                    
+                    j_end = j
+                    while j_end < num_points - 2:
+                        if isinstance(self.indices, tuple):
+                            next_idx = (self.indices[0][j_end+1], self.indices[1][j_end+1])
+                        else:
+                            next_idx = self.indices[j_end+1]
+                        
+                        if next_idx != curr_idx:
+                            break
+                        j_end += 1
+                    
+                    # Properties from start of span
+                    val = float(self.vals[i, j])
+                    z_t = l_top_all[j]
+                    z_b = l_bot_all[j]
+                    
+                    if not np.isnan(val) and not np.isnan(z_t) and not np.isnan(z_b):
+                        # Bin index
+                        norm = (val - min_val) / val_range
+                        bin_idx = int(norm * (n_bins - 1))
+                        bin_idx = max(0, min(n_bins-1, bin_idx))
+                        
+                        # Flat rectangle
+                        # Note: we use dists[j_end+1] to close the gap
+                        poly = QtGui.QPolygonF([
+                            QtCore.QPointF(self.dists[j], z_t),
+                            QtCore.QPointF(self.dists[j_end+1], z_t),
+                            QtCore.QPointF(self.dists[j_end+1], z_b),
+                            QtCore.QPointF(self.dists[j], z_b)
+                        ])
+                        paths[bin_idx].addPolygon(poly)
+                        
+                        if boundary_path:
+                            boundary_path.moveTo(self.dists[j], z_t)
+                            boundary_path.lineTo(self.dists[j_end+1], z_t)
+                            boundary_path.moveTo(self.dists[j], z_b)
+                            boundary_path.lineTo(self.dists[j_end+1], z_b)
+                    
+                    j = j_end + 1
+                    
+                else:
+                    # Original Interpolated Logic
+                    val = float(self.vals[i, j])
+                    if not np.isnan(val):
+                        # Skip if geometry is NaN (Out of Domain)
+                        z_t1, z_t2 = l_top_all[j], l_top_all[j+1]
+                        z_b1, z_b2 = l_bot_all[j], l_bot_all[j+1]
+                        
+                        if not (np.isnan(z_t1) or np.isnan(z_t2) or np.isnan(z_b1) or np.isnan(z_b2)):
+                            # Bin index
+                            norm = (val - min_val) / val_range
+                            bin_idx = int(norm * (n_bins - 1))
+                            bin_idx = max(0, min(n_bins-1, bin_idx))
+                            
+                            # Slanted quad
+                            poly = QtGui.QPolygonF([
+                                QtCore.QPointF(self.dists[j], z_t1),
+                                QtCore.QPointF(self.dists[j+1], z_t2),
+                                QtCore.QPointF(self.dists[j+1], z_b2),
+                                QtCore.QPointF(self.dists[j], z_b1)
+                            ])
+                            paths[bin_idx].addPolygon(poly)
+                            
+                            if boundary_path:
+                                boundary_path.moveTo(self.dists[j], z_t1)
+                                boundary_path.lineTo(self.dists[j+1], z_t2)
+                                boundary_path.moveTo(self.dists[j], z_b1)
+                                boundary_path.lineTo(self.dists[j+1], z_b2)
+                    j += 1
+        
+        # Draw paths
         for bin_idx, path in enumerate(paths):
             if path.isEmpty(): continue
             p.setBrush(pg.mkBrush(colors[bin_idx]))
             p.drawPath(path)
+            
+        # Draw optional boundary lines
+        if boundary_path and not boundary_path.isEmpty():
+            p.setBrush(pg.mkBrush(None))
+            p.setPen(pg.mkPen('k', width=1))
+            p.drawPath(boundary_path)
             
         p.end()
         
