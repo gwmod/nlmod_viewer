@@ -424,6 +424,11 @@ class NetcdfHandler:
                 oob_mask = (xs < x_min_val - dx/2) | (xs > x_max_val + dx/2) | \
                            (ys < y_min_val - dy/2) | (ys > y_max_val + dy/2)
 
+                # Store indices for flat plotting
+                indices = (yi, xi)
+                cell_x = x_var[xi]
+                cell_y = y_var[yi]
+
                 x_min_idx, x_max_idx = xi.min(), xi.max()
                 y_min_idx, y_max_idx = yi.min(), yi.max()
                 sl_y = slice(y_min_idx, y_max_idx + 1)
@@ -493,6 +498,8 @@ class NetcdfHandler:
                     d2 = (xc - xs[p_idx])**2 + (yc - ys[p_idx])**2
                     indices.append(np.nanargmin(d2))
                 indices = np.array(indices)
+                cell_x = xc[indices]
+                cell_y = yc[indices]
                 
                 def get_data(varname):
                     var = self.ds.variables[varname]
@@ -536,12 +543,27 @@ class NetcdfHandler:
             if vals is not None:
                 vals[:, oob_mask] = np.nan
             
+            # Layer Names
+            layer_names = []
+            if botm is not None:
+                num_layers = botm.shape[0]
+                if 'layer' in self.ds.variables:
+                    l_var = self.ds.variables['layer']
+                    if l_var.ndim == 1 and len(l_var) == num_layers:
+                        layer_names = [str(x) for x in l_var[:]]
+                
+                if not layer_names:
+                    layer_names = [str(i+1) for i in range(num_layers)]
+
             return {
                 "distances": distances,
                 "top": top,
                 "botm": botm,
                 "values": vals,
-                "indices": indices, # Add indices
+                "indices": indices,
+                "cell_x": cell_x,
+                "cell_y": cell_y,
+                "layer_names": layer_names,
                 "num_layers": botm.shape[0] if botm is not None else 0
             }
 

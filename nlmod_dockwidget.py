@@ -137,11 +137,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.var_list.addItem(item)
     
     def update_layer_selection(self):
+        # Save current selection if any
+        current_layer = self.layer_combo.currentText()
+        
+        self.layer_combo.blockSignals(True)
         self.layer_combo.clear()
         self.layer_combo.setEnabled(False)
         
         selected_items = self.var_list.selectedItems()
         if not selected_items:
+            self.layer_combo.blockSignals(False)
             return
             
         item = selected_items[0]
@@ -150,10 +155,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         if layer_size and layer_size > 0:
             self.layer_combo.setEnabled(True)
+            new_items = []
             if layer_values:
-                self.layer_combo.addItems([str(x) for x in layer_values])
+                new_items = [str(x) for x in layer_values]
             else:
-                self.layer_combo.addItems([str(i+1) for i in range(layer_size)])
+                new_items = [str(i+1) for i in range(layer_size)]
+            
+            self.layer_combo.addItems(new_items)
+            
+            # Try to restore previous selection
+            idx = self.layer_combo.findText(current_layer)
+            if idx >= 0:
+                self.layer_combo.setCurrentIndex(idx)
+            else:
+                # If not found, default to first or keep current (which is first after clear+add)
+                pass
+        
+        self.layer_combo.blockSignals(False)
 
     def add_layer(self):
         if not self.handler:
@@ -177,14 +195,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             # For vertex grids, export to a dedicated clean UGRID file
             # This solves MDAL's identification issues with complex multi-var files
+            layer_val = "1"
             layer_idx = 0
             if self.layer_combo.isEnabled():
+                layer_val = self.layer_combo.currentText()
                 layer_idx = self.layer_combo.currentIndex()
             
             # Create a descriptive temp filename
             temp_dir = tempfile.gettempdir()
             clean_var = "".join(x for x in var_name if x.isalnum())
-            temp_path = os.path.join(temp_dir, f"nlmod_{clean_var}_L{layer_idx+1}.nc")
+            clean_val = "".join(x for x in layer_val if x.isalnum())
+            temp_path = os.path.join(temp_dir, f"nlmod_{clean_var}_{clean_val}.nc")
             
             QgsMessageLog.logMessage(f"NLMOD: Exporting mesh to {temp_path}", "NlmodInspector", Qgis.Info)
             
@@ -194,7 +215,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export mesh: {msg}")
                 return
             
-            layer_name = f"{base_name} - {var_name} (L{layer_idx+1})"
+            layer_name = f"{base_name} - {var_name} ({layer_val})"
             layer = QgsMeshLayer(temp_path, layer_name, "mdal")
             
             if layer.isValid():
@@ -226,7 +247,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if idx >= 0:
                     band_idx = idx + 1
                     val_str = self.layer_combo.currentText()
-                    layer_name = f"{var_name} (Layer {val_str}) @ {base_name}"
+                    layer_name = f"{var_name} ({val_str}) @ {base_name}"
             
             # --- VRT Workaround for Coordinates ---
             # QGIS/GDAL often defaults to 0..N if grid mapping isn't standard.

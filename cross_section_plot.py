@@ -109,6 +109,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         
         layout.addLayout(tools_layout)
         
+        # Picking Info Label
+        self.info_label = QtWidgets.QLabel("Click in plot to see cell info")
+        self.info_label.setStyleSheet("font-weight: bold; color: #444; background: #f0f0f0; padding: 4px; border-radius: 4px;")
+        layout.addWidget(self.info_label)
+        
         # Store data for re-rendering
         self.data = data
         self.colorbar = None
@@ -130,6 +135,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.plot_widget.setLabel('left', 'Elevation', units='m', **styles)
         self.plot_widget.setLabel('bottom', 'Distance', units='m', **styles)
         self.plot_widget.showGrid(x=False, y=False)
+        
+        # Add Mouse Click Handler
+        self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
         
         # Render Data
         self.render_data(data, vertex_distances=vertex_distances)
@@ -222,6 +230,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 changed = True
                 
             if changed:
+                # Clear info
+                self.info_label.setText("Click in plot to see cell info")
                 # Re-render
                 self.render_data(self.data, vertex_distances=self.vertex_distances)
 
@@ -237,6 +247,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 self.current_var = var_name
                 self.setWindowTitle(f"Cross Section {self.cs_label}: {var_name}")
                 
+                # Clear info
+                self.info_label.setText("Click in plot to see cell info")
+                
                 # Re-render (using auto-range for the first time on new var)
                 if hasattr(self, '_first_render_done'):
                     delattr(self, '_first_render_done')
@@ -250,6 +263,57 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                     self.variable_changed.emit(self.item_id, var_name)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch data for {var_name}: {e}")
+
+    def on_plot_clicked(self, event):
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+            
+        pos = event.scenePos()
+        if not self.plot_widget.plotItem.sceneBoundingRect().contains(pos):
+            return
+            
+        mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
+        x_click = mouse_point.x()
+        z_click = mouse_point.y()
+        
+        # Find the point index in distances
+        dists = self.data['distances']
+        if len(dists) == 0: return
+        
+        idx = np.abs(dists - x_click).argmin()
+        
+        # Find the layer
+        top = self.data['top'][idx]
+        botm = self.data['botm'][:, idx]
+        num_layers = self.data['num_layers']
+        
+        found_layer = -1
+        for i in range(num_layers):
+            l_top = top if i == 0 else botm[i-1]
+            l_bot = botm[i]
+            
+            if np.isnan(l_top) or np.isnan(l_bot): continue
+            
+            # Check if z_click is between l_top and l_bot
+            # Keep in mind coordinate system (usually positive is up)
+            z_min = min(l_top, l_bot)
+            z_max = max(l_top, l_bot)
+            if z_min <= z_click <= z_max:
+                found_layer = i
+                break
+        
+        if found_layer != -1:
+            val = self.data['values'][found_layer, idx]
+            cx = self.data['cell_x'][idx]
+            cy = self.data['cell_y'][idx]
+            layer_name = self.data['layer_names'][found_layer]
+            
+            val_str = f"{val:.4f}" if not np.isnan(val) else "NaN"
+            self.info_label.setText(
+                f"X: {cx:.1f}, Y: {cy:.1f}, Layer: {layer_name}, Value: {val_str}"
+            )
+        else:
+            self.info_label.setText("No cell at click location")
 
     def render_data(self, data, v_min=None, v_max=None, vertex_distances=None):
         # Clear previous items
