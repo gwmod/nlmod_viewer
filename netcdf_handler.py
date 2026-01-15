@@ -4,6 +4,11 @@ except ImportError:
     netCDF4 = None
 
 import os
+import numpy as np
+try:
+    from scipy.spatial import cKDTree
+except ImportError:
+    cKDTree = None
 
 class NetcdfHandler:
     def __init__(self, filepath):
@@ -490,14 +495,28 @@ class NetcdfHandler:
                             yc[i] = np.mean(yv[valid])
                 
                 # Nearest neighbor search (Centroids to Cross-section points)
-                # Compute distance matrix between centroids (Ncells) and points (Npoints)
-                # This could be memory intensive for huge grids, but is robust.
-                # Optimized version: find index of min distance
-                indices = []
-                for p_idx in range(len(xs)):
-                    d2 = (xc - xs[p_idx])**2 + (yc - ys[p_idx])**2
-                    indices.append(np.nanargmin(d2))
-                indices = np.array(indices)
+                # Using scipy.spatial.cKDTree for O(log N) search speed
+                if cKDTree is not None and not np.isnan(xc).any() and not np.isnan(yc).any():
+                    # Check for any NaNs because KDTree doesn't handle them well
+                    valid_mask = ~np.isnan(xc) & ~np.isnan(yc)
+                    if valid_mask.all():
+                        tree = cKDTree(np.stack([xc, yc], axis=1))
+                        _, indices = tree.query(np.stack([xs, ys], axis=1))
+                    else:
+                        # Fallback for grids with some NaNs in centroids
+                        v_xc = xc[valid_mask]
+                        v_yc = yc[valid_mask]
+                        v_indices = np.where(valid_mask)[0]
+                        tree = cKDTree(np.stack([v_xc, v_yc], axis=1))
+                        _, temp_idx = tree.query(np.stack([xs, ys], axis=1))
+                        indices = v_indices[temp_idx]
+                else:
+                    # Fallback to manual numpy loop if scipy is missing
+                    indices = []
+                    for p_idx in range(len(xs)):
+                        d2 = (xc - xs[p_idx])**2 + (yc - ys[p_idx])**2
+                        indices.append(np.nanargmin(d2))
+                    indices = np.array(indices)
                 cell_x = xc[indices]
                 cell_y = yc[indices]
                 
@@ -666,19 +685,32 @@ class NetcdfHandler:
                 xc_vals = xc_in[:]
                 yc_vals = yc_in[:]
             else:
-                # Calculate
+                # Optimized Vectorized Calculation
                 xv_data = xv_in[:]
                 yv_data = yv_in[:]
                 icv_data = icert_in[:]
                 nodata = getattr(icert_in, 'nodata', -1)
-                xc_vals = np.full(n_cells, np.nan)
-                yc_vals = np.full(n_cells, np.nan)
-                for i in range(n_cells):
-                    v_idx = icv_data[i]
-                    valid = v_idx[v_idx != nodata]
-                    if len(valid) > 0:
-                        xc_vals[i] = np.mean(xv_data[valid])
-                        yc_vals[i] = np.mean(yv_data[valid])
+                
+                # Mask valid indices
+                mask = (icv_data != nodata)
+                # Replace invalid with 0 temporarily for broadcasting
+                safe_indices = np.where(mask, icv_data, 0)
+                
+                # Map vertices to cells
+                vals_x = xv_data[safe_indices]
+                vals_y = yv_data[safe_indices]
+                
+                # Compute means (sum / count)
+                counts = np.sum(mask, axis=1)
+                # Avoid division by zero
+                counts_safe = np.where(counts > 0, counts, 1)
+                
+                xc_vals = np.sum(vals_x * mask, axis=1) / counts_safe
+                yc_vals = np.sum(vals_y * mask, axis=1) / counts_safe
+                
+                # Re-apply NaN to where counts were 0
+                xc_vals[counts == 0] = np.nan
+                yc_vals[counts == 0] = np.nan
             
             xc_out = out_ds.createVariable('xc', 'f4', ('icell2d',))
             yc_out = out_ds.createVariable('yc', 'f4', ('icell2d',))

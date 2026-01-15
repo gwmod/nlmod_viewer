@@ -80,7 +80,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.cs_list.itemDoubleClicked.connect(self.raise_cross_section_window)
         cs_layout.addWidget(self.cs_list)
         
-        self.btn_remove_cs = QtWidgets.QPushButton("Remove Selected Plot")
+        self.btn_remove_cs = QtWidgets.QPushButton("Remove Cross-Section")
         self.btn_remove_cs.clicked.connect(self.remove_cross_section)
         cs_layout.addWidget(self.btn_remove_cs)
         
@@ -491,6 +491,24 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 scalar_settings.setDataResamplingMethod(0)
             
             settings.setScalarSettings(idx, scalar_settings)
+            
+            # 6. Native Mesh Rendering (Wireframe)
+            # User requested 0.1 mm line width
+            if hasattr(settings, 'nativeMeshSettings'):
+                m_set = settings.nativeMeshSettings()
+                m_set.setEnabled(True)
+                m_set.setLineWidth(0.1)
+                if hasattr(Qgis, 'RenderMillimeters'):
+                    m_set.setLineWidthUnit(Qgis.RenderMillimeters)
+                settings.setNativeMeshSettings(m_set)
+            
+            if hasattr(settings, 'edgeSettings'):
+                # Keep edges disabled unless explicitly asked, 
+                # as native mesh usually covers the wireframe needs.
+                e_set = settings.edgeSettings()
+                e_set.setEnabled(False)
+                settings.setEdgeSettings(e_set)
+
             layer.setRendererSettings(settings)
             layer.triggerRepaint()
 
