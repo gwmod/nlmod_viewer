@@ -75,16 +75,18 @@ class CrossSectionMapTool(QgsMapToolEmitPoint):
                 self.refresh_display()
                 
         elif e.button() == Qt.RightButton:
-            if self.is_drawing and len(self.points) >= 2:
-                # Finish drawing
-                self.is_drawing = False
-                self.line_finished.emit(self.points)
-                self.refresh_display()
-            else:
-                # Cancel drawing
-                self.is_drawing = False
-                self.points = []
-                self.refresh_display()
+            if self.is_drawing:
+                if len(self.points) >= 2:
+                    # Finish drawing
+                    self.is_drawing = False
+                    self.line_finished.emit(self.points)
+                    self.refresh_display()
+                else:
+                    # Cancel drawing
+                    self.is_drawing = False
+                    self.points = []
+                    self.refresh_display()
+            # If not drawing (i.e. editing), right-click does nothing to the points
 
     def is_close(self, p1, p2):
         # Pixel-based tolerance for selection

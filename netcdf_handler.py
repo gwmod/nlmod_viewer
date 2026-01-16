@@ -10,6 +10,13 @@ try:
 except ImportError:
     cKDTree = None
 
+try:
+    import shapely
+    from shapely.geometry import LineString, Polygon, MultiLineString
+    from shapely import STRtree, intersection, line_locate_point, get_coordinates, box
+except ImportError:
+    shapely = None
+
 class NetcdfHandler:
     def __init__(self, filepath):
         self.filepath = filepath
@@ -301,281 +308,216 @@ class NetcdfHandler:
             
         return "\n".join(info)
 
-    def get_crs(self):
-        """Attempts to retrieve the CRS from the NetCDF file."""
-        if not self.ds:
-            return None
-            
-        # Common variable names for grid mapping
-        crs_vars = ['spatial_ref', 'crs', 'grid_mapping']
+    def _get_centroids(self):
+        """Helper to get or calculate centroids for any grid type."""
+        import numpy as np
+        if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
+            return self.ds.variables['xc'][:], self.ds.variables['yc'][:]
         
-        for vname in crs_vars:
-            if vname in self.ds.variables:
-                var = self.ds.variables[vname]
-                # Check for WKT or similar attributes
-                if hasattr(var, 'crs_wkt'):
-                    return var.crs_wkt
-                if hasattr(var, 'spatial_ref'):
-                    return var.spatial_ref
-                if hasattr(var, 'epsg_code'):
-                    return f"EPSG:{var.epsg_code}"
-                    
-        # Check global attributes if no variable found
-        if hasattr(self.ds, 'Conventions') and 'CF' in self.ds.Conventions:
-             # Try to find grid_mapping attribute on data variables?
-             pass
-             
-        return None
+        # Calculate from vertices if needed (generic approach)
+        if 'icvert' in self.ds.variables and 'xv' in self.ds.variables and 'yv' in self.ds.variables:
+            icv = self.ds.variables['icvert'][:]
+            xv = self.ds.variables['xv'][:]
+            yv = self.ds.variables['yv'][:]
+            nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+            
+            n_cells = icv.shape[0]
+            xc = np.full(n_cells, np.nan)
+            yc = np.full(n_cells, np.nan)
+            
+            if shapely:
+                # Use shapely Polygons for true centroid (area-weighted)
+                for i in range(n_cells):
+                    curr_v = icv[i]
+                    v_idx = curr_v[curr_v != nodata]
+                    if len(v_idx) >= 3:
+                        try:
+                            p = Polygon(zip(xv[v_idx], yv[v_idx]))
+                            cent = p.centroid
+                            xc[i], yc[i] = cent.x, cent.y
+                        except:
+                            pass
+            else:
+                # Arithmetic mean fallback - improved to handle duplicated vertices
+                for i in range(n_cells):
+                    curr_v = icv[i]
+                    v_idx = curr_v[curr_v != nodata]
+                    if len(v_idx) > 0:
+                        # Exclude last point if it duplicates the first
+                        if len(v_idx) > 1 and v_idx[0] == v_idx[-1]:
+                            v_idx = v_idx[:-1]
+                        xc[i] = np.mean(xv[v_idx])
+                        yc[i] = np.mean(yv[v_idx])
+            return xc, yc
+        return None, None
 
-    def get_cross_section_data(self, variable_name, points, num_points=100):
+    def _get_line_segment_ranges(self, line, intersection_geom):
+        """Returns a list of (d1, d2) tuples representing linear segments along the line."""
+        if not intersection_geom or intersection_geom.is_empty:
+            return []
+        
+        from shapely import Point
+        geom_type = intersection_geom.geom_type
+        parts = []
+        if geom_type == 'LineString':
+            parts = [intersection_geom]
+        elif geom_type == 'MultiLineString':
+            parts = list(intersection_geom.geoms)
+        elif geom_type == 'GeometryCollection':
+            for g in intersection_geom.geoms:
+                if g.geom_type == 'LineString': parts.append(g)
+                elif g.geom_type == 'MultiLineString': parts.extend(list(g.geoms))
+        
+        ranges = []
+        for p in parts:
+            if len(p.coords) >= 2:
+                d1 = line_locate_point(line, Point(p.coords[0]))
+                d2 = line_locate_point(line, Point(p.coords[-1]))
+                ranges.append((min(d1, d2), max(d1, d2)))
+        return ranges
+
+    def get_cross_section_data(self, variable_name, points):
         """
-        Extracts cross-section data for a given variable along a polyline.
-        points: List of (x, y) tuples or objects with x, y attributes.
-        Returns a dict with distances, elevation data, and variable data.
+        Extracts cross-section data using exact Shapely intersections with cell geometries.
         """
         if not self.ds:
             return None
 
-        # 1. Generate points along the polyline
         import numpy as np
         
-        # Ensure points is a list
-        if not isinstance(points, list):
-             # Legacy support or single point? assume [p1, p2] passed as args?
-             # Actually, if the caller changed, we should just assume list.
-             # But let's handle if user passed just one point (error)
-             return None
-             
-        if len(points) < 2:
-             return None
-
-        xs_list = []
-        ys_list = []
-        dist_list = []
-        
-        # Extract coordinates from QgsPoints or tuples
+        # 1. Prepare Line
         pts_coords = []
         for p in points:
-             if hasattr(p, 'x'): pts_coords.append((p.x(), p.y()))
-             else: pts_coords.append(p)
-             
-        # Calculate total length to allocate num_points
-        segment_lengths = []
-        total_len = 0.0
-        for i in range(len(pts_coords)-1):
-             p1 = pts_coords[i]
-             p2 = pts_coords[i+1]
-             dist = np.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2)
-             segment_lengths.append(dist)
-             total_len += dist
-             
-        if total_len == 0:
-             return None
+            if hasattr(p, 'x'): pts_coords.append((p.x(), p.y()))
+            else: pts_coords.append(p)
+        
+        if len(pts_coords) < 2: return None
+        
+        if shapely is None:
+            # This should not happen if QGIS environment is correct as per user
+            return {"error": "Shapely library is required for cross-sections."}
 
-        current_dist = 0.0
+        line = LineString(pts_coords)
+        bbox = line.bounds # (minx, miny, maxx, maxy)
         
-        # Collect all points
-        # Be careful not to duplicate vertices
+        # 2. Identify candidate cells and calculate intersections
+        cell_segments = [] # List of {'d1':, 'd2':, 'idx':, 'cx':, 'cy':}
         
-        for i in range(len(pts_coords)-1):
-             seg_len = segment_lengths[i]
-             # Number of points for this segment
-             n_seg = int(np.ceil(num_points * (seg_len / total_len)))
-             if n_seg < 2: n_seg = 2
-             
-             p1 = pts_coords[i]
-             p2 = pts_coords[i+1]
-             
-             # Linspace for segment
-             # endpoint=False unless it's the last segment
-             is_last = (i == len(pts_coords) - 2)
-             
-             s_xs = np.linspace(p1[0], p2[0], n_seg)
-             s_ys = np.linspace(p1[1], p2[1], n_seg)
-             s_dists = np.linspace(current_dist, current_dist + seg_len, n_seg)
-             
-             if not is_last:
-                  # Remove last point to avoid double counting
-                  s_xs = s_xs[:-1]
-                  s_ys = s_ys[:-1]
-                  s_dists = s_dists[:-1]
-                  
-             xs_list.append(s_xs)
-             ys_list.append(s_ys)
-             dist_list.append(s_dists)
-             
-             current_dist += seg_len
-             
-        xs = np.concatenate(xs_list)
-        ys = np.concatenate(ys_list)
-        distances = np.concatenate(dist_list)
+        if self.grid_type == 'structured':
+            x_v, y_v = self.ds.variables['x'][:], self.ds.variables['y'][:]
+            dx = np.abs(x_v[1]-x_v[0]) if len(x_v) > 1 else 0
+            dy = np.abs(y_v[1]-y_v[0]) if len(y_v) > 1 else 0
+            
+            # Bound query
+            ix = np.where((x_v >= bbox[0] - dx) & (x_v <= bbox[2] + dx))[0]
+            iy = np.where((y_v >= bbox[1] - dy) & (y_v <= bbox[3] + dy))[0]
+            
+            for r in iy:
+                for c in ix:
+                    xc, yc = x_v[c], y_v[r]
+                    p = box(xc - dx/2, yc - dy/2, xc + dx/2, yc + dy/2)
+                    if line.intersects(p):
+                        inter = intersection(line, p)
+                        for d1, d2 in self._get_line_segment_ranges(line, inter):
+                            cell_segments.append({'d1': d1, 'd2': d2, 'idx': (r, c), 'cx': xc, 'cy': yc})
+        else:
+            # Vertex Grid
+            icv = self.ds.variables['icvert'][:]
+            xv = self.ds.variables['xv'][:]
+            yv = self.ds.variables['yv'][:]
+            nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+            xc_all, yc_all = self._get_centroids()
+            if xc_all is None: return None
+            
+            # Candidate filter (centroids within bbox + buffer)
+            c_mask = (xc_all >= bbox[0] - 1000) & (xc_all <= bbox[2] + 1000) & \
+                     (yc_all >= bbox[1] - 1000) & (yc_all <= bbox[3] + 1000)
+            cand_indices = np.where(c_mask)[0]
+            
+            for i in cand_indices:
+                v_idx = icv[i][icv[i] != nodata]
+                if len(v_idx) < 3: continue
+                p = Polygon(zip(xv[v_idx], yv[v_idx]))
+                if line.intersects(p):
+                    inter = intersection(line, p)
+                    for d1, d2 in self._get_line_segment_ranges(line, inter):
+                        cell_segments.append({'d1': d1, 'd2': d2, 'idx': int(i), 'cx': xc_all[i], 'cy': yc_all[i]})
+
+        if not cell_segments:
+            return {"error": "No cells found along the cross-section line."}
+
+        # 3. Sort segments by distance and build transition points
+        cell_segments.sort(key=lambda x: x['d1'])
         
-        # 2. Extract Data
+        # We need a point at the start and end of each segment for proper flat rendering
+        final_dists = []
+        indices_list = []
+        cell_x = []
+        cell_y = []
+        
+        for seg in cell_segments:
+            # Entry point
+            final_dists.append(seg['d1'])
+            indices_list.append(seg['idx'])
+            cell_x.append(seg['cx'])
+            cell_y.append(seg['cy'])
+            # Exit point
+            final_dists.append(seg['d2'])
+            indices_list.append(seg['idx'])
+            cell_x.append(seg['cx'])
+            cell_y.append(seg['cy'])
+
+        final_dists = np.array(final_dists)
+        cell_x = np.array(cell_x)
+        cell_y = np.array(cell_y)
+        
+        # 4. Fetch Scalar Data
         try:
             if self.grid_type == 'structured':
-                x_var = self.ds.variables['x'][:]
-                y_var = self.ds.variables['y'][:]
-                
-                # Robust ABS Argmin
-                xi = np.abs(x_var[:, None] - xs[None, :]).argmin(axis=0)
-                yi = np.abs(y_var[:, None] - ys[None, :]).argmin(axis=0)
-
-                # Identify out-of-bounds points
-                x_min_val, x_max_val = np.min(x_var), np.max(x_var)
-                y_min_val, y_max_val = np.min(y_var), np.max(y_var)
-                dx = np.abs(x_var[1] - x_var[0]) if len(x_var) > 1 else 1.0
-                dy = np.abs(y_var[1] - y_var[0]) if len(y_var) > 1 else 1.0
-                
-                oob_mask = (xs < x_min_val - dx/2) | (xs > x_max_val + dx/2) | \
-                           (ys < y_min_val - dy/2) | (ys > y_max_val + dy/2)
-
-                # Store indices for flat plotting
+                yi = np.array([idx[0] for idx in indices_list])
+                xi = np.array([idx[1] for idx in indices_list])
                 indices = (yi, xi)
-                cell_x = x_var[xi]
-                cell_y = y_var[yi]
-
-                x_min_idx, x_max_idx = xi.min(), xi.max()
-                y_min_idx, y_max_idx = yi.min(), yi.max()
-                sl_y = slice(y_min_idx, y_max_idx + 1)
-                sl_x = slice(x_min_idx, x_max_idx + 1)
-                xi_local = xi - x_min_idx
-                yi_local = yi - y_min_idx
                 
-                def get_data(varname, slice_obj=None):
-                    var = self.ds.variables[varname]
-                    if slice_obj: data = var[slice_obj]
-                    else: data = var[:]
-                    if isinstance(data, np.ma.MaskedArray): return data.filled(np.nan)
-                    return data.astype(float)
-
-                top_chunk = get_data('top', (sl_y, sl_x))
-                botm_chunk = get_data('botm', (slice(None), sl_y, sl_x))
-                top = top_chunk[yi_local, xi_local]
-                botm = botm_chunk[:, yi_local, xi_local]
+                # Slicing optimization
+                sy = slice(yi.min(), yi.max()+1)
+                sx = slice(xi.min(), xi.max()+1)
+                yl, xl = yi - yi.min(), xi - xi.min()
                 
-                vals = None
-                if variable_name:
-                    var = self.ds.variables[variable_name]
-                    if var.ndim == 4:
-                         vals_chunk = get_data(variable_name, (-1, slice(None), sl_y, sl_x))
-                         vals = vals_chunk[:, yi_local, xi_local]
-                    elif var.ndim == 3:
-                         vals_chunk = get_data(variable_name, (slice(None), sl_y, sl_x))
-                         vals = vals_chunk[:, yi_local, xi_local]
-                
-                # Store indices for flat plotting
-                indices = (yi, xi)
-
-            elif self.grid_type == 'vertex':
-                # Vertex/Unstructured grid support
-                if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
-                    xc = self.ds.variables['xc'][:]
-                    yc = self.ds.variables['yc'][:]
-                else:
-                    # Calculate centroids from vertices
-                    if 'icvert' not in self.ds.variables or 'xv' not in self.ds.variables or 'yv' not in self.ds.variables:
-                        return {"error": "Vertex grid missing topology (icvert/xv/yv)"}
+                def get_v(v):
+                    if v not in self.ds.variables: return None
+                    d = self.ds.variables[v]
+                    if d.ndim == 2: c = d[sy, sx]
+                    elif d.ndim == 3: c = d[:, sy, sx]
+                    elif d.ndim == 4: c = d[-1, :, sy, sx]
+                    else: return None
+                    arr = c.filled(np.nan) if hasattr(c, 'filled') else c
+                    return arr[:, yl, xl] if d.ndim > 2 else arr[yl, xl]
                     
-                    icvert = self.ds.variables['icvert'][:]
-                    xv = self.ds.variables['xv'][:]
-                    yv = self.ds.variables['yv'][:]
-                    
-                    # icvert is (icell2d, icv). Nodata values should be ignored.
-                    nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
-                    
-                    # Calculate mean of valid vertices for each cell
-                    xc = np.full(icvert.shape[0], np.nan)
-                    yc = np.full(icvert.shape[0], np.nan)
-                    
-                    for i in range(icvert.shape[0]):
-                        v_idx = icvert[i]
-                        valid = v_idx[v_idx != nodata]
-                        if len(valid) > 0:
-                            xc[i] = np.mean(xv[valid])
-                            yc[i] = np.mean(yv[valid])
-                
-                # Nearest neighbor search (Centroids to Cross-section points)
-                # Using scipy.spatial.cKDTree for O(log N) search speed
-                if cKDTree is not None and not np.isnan(xc).any() and not np.isnan(yc).any():
-                    # Check for any NaNs because KDTree doesn't handle them well
-                    valid_mask = ~np.isnan(xc) & ~np.isnan(yc)
-                    if valid_mask.all():
-                        tree = cKDTree(np.stack([xc, yc], axis=1))
-                        _, indices = tree.query(np.stack([xs, ys], axis=1))
-                    else:
-                        # Fallback for grids with some NaNs in centroids
-                        v_xc = xc[valid_mask]
-                        v_yc = yc[valid_mask]
-                        v_indices = np.where(valid_mask)[0]
-                        tree = cKDTree(np.stack([v_xc, v_yc], axis=1))
-                        _, temp_idx = tree.query(np.stack([xs, ys], axis=1))
-                        indices = v_indices[temp_idx]
-                else:
-                    # Fallback to manual numpy loop if scipy is missing
-                    indices = []
-                    for p_idx in range(len(xs)):
-                        d2 = (xc - xs[p_idx])**2 + (yc - ys[p_idx])**2
-                        indices.append(np.nanargmin(d2))
-                    indices = np.array(indices)
-                cell_x = xc[indices]
-                cell_y = yc[indices]
-                
-                def get_data(varname):
-                    var = self.ds.variables[varname]
-                    data = var[:]
-                    if isinstance(data, np.ma.MaskedArray): return data.filled(np.nan)
-                    return data.astype(float)
-
-                top_all = get_data('top')
-                botm_all = get_data('botm')
-                
-                top = top_all[indices]
-                botm = botm_all[:, indices]
-                
-                vals = None
-                if variable_name:
-                    var = self.ds.variables[variable_name]
-                    data_all = get_data(variable_name)
-                    if data_all.ndim == 3: # (time, layer, icell2d)
-                        vals = data_all[-1, :, indices]
-                    elif data_all.ndim == 2: # (layer, icell2d)
-                        vals = data_all[:, indices]
-                
-                # OOB mask for vertex grid (if too far from any centroid, but argmin always finds one)
-                # We can check a threshold distance or use the min/max of centroids
-                x_min_val, x_max_val = np.nanmin(xc), np.nanmax(xc)
-                y_min_val, y_max_val = np.nanmin(yc), np.nanmax(yc)
-                # Use a larger buffer for vertex grids as cells are often irregular
-                dx = (x_max_val - x_min_val) / np.sqrt(len(xc))
-                dy = (y_max_val - y_min_val) / np.sqrt(len(yc))
-                oob_mask = (xs < x_min_val - dx) | (xs > x_max_val + dx) | \
-                           (ys < y_min_val - dy) | (ys > y_max_val + dy)
-
+                top = get_v('top')
+                botm = get_v('botm')
+                vals = get_v(variable_name) if variable_name else None
             else:
-                return {"error": f"Unsupported or unknown grid type: {self.grid_type}"}
-
-            # Final check / Apply OOB
-            if top is not None:
-                top[oob_mask] = np.nan
-            if botm is not None:
-                botm[:, oob_mask] = np.nan
-            if vals is not None:
-                vals[:, oob_mask] = np.nan
-            
-            # Layer Names
-            layer_names = []
-            if botm is not None:
-                num_layers = botm.shape[0]
-                if 'layer' in self.ds.variables:
-                    l_var = self.ds.variables['layer']
-                    if l_var.ndim == 1 and len(l_var) == num_layers:
-                        layer_names = [str(x) for x in l_var[:]]
+                idx = np.array(indices_list)
+                indices = idx
                 
-                if not layer_names:
-                    layer_names = [str(i+1) for i in range(num_layers)]
+                def get_v(v):
+                    if v not in self.ds.variables: return None
+                    d = self.ds.variables[v]
+                    if d.ndim == 1: c = d[idx]
+                    elif d.ndim == 2: c = d[:, idx]
+                    elif d.ndim == 3: c = d[-1, :, idx]
+                    else: return None
+                    return c.filled(np.nan) if hasattr(c, 'filled') else c
+                
+                top, botm = get_v('top'), get_v('botm')
+                vals = get_v(variable_name) if variable_name else None
+
+            # 5. Layer Names
+            nm = self.ds.variables.get('layer', [str(i+1) for i in range(botm.shape[0])])[:]
+            layer_names = [str(x) for x in nm] if hasattr(nm, '__len__') else [str(i+1) for i in range(botm.shape[0])]
 
             return {
-                "distances": distances,
+                "distances": final_dists,
                 "top": top,
                 "botm": botm,
                 "values": vals,
@@ -583,11 +525,12 @@ class NetcdfHandler:
                 "cell_x": cell_x,
                 "cell_y": cell_y,
                 "layer_names": layer_names,
-                "num_layers": botm.shape[0] if botm is not None else 0
+                "num_layers": botm.shape[0]
             }
 
         except Exception as e:
-            return {"error": str(e)}
+            import traceback
+            return {"error": f"Data extraction failed: {str(e)}\n{traceback.format_exc()}"}
 
     def export_to_mesh(self, var_name, layer_idx=0, output_path=None):
         """
@@ -678,39 +621,9 @@ class NetcdfHandler:
                 yv_out.units = "m"
 
             # Centroids (xc, yc) - Calculated if missing
-            xc_in = self.ds.variables.get('xc')
-            yc_in = self.ds.variables.get('yc')
-            
-            if xc_in is not None and yc_in is not None:
-                xc_vals = xc_in[:]
-                yc_vals = yc_in[:]
-            else:
-                # Optimized Vectorized Calculation
-                xv_data = xv_in[:]
-                yv_data = yv_in[:]
-                icv_data = icert_in[:]
-                nodata = getattr(icert_in, 'nodata', -1)
-                
-                # Mask valid indices
-                mask = (icv_data != nodata)
-                # Replace invalid with 0 temporarily for broadcasting
-                safe_indices = np.where(mask, icv_data, 0)
-                
-                # Map vertices to cells
-                vals_x = xv_data[safe_indices]
-                vals_y = yv_data[safe_indices]
-                
-                # Compute means (sum / count)
-                counts = np.sum(mask, axis=1)
-                # Avoid division by zero
-                counts_safe = np.where(counts > 0, counts, 1)
-                
-                xc_vals = np.sum(vals_x * mask, axis=1) / counts_safe
-                yc_vals = np.sum(vals_y * mask, axis=1) / counts_safe
-                
-                # Re-apply NaN to where counts were 0
-                xc_vals[counts == 0] = np.nan
-                yc_vals[counts == 0] = np.nan
+            xc_vals, yc_vals = self._get_centroids()
+            if xc_vals is None:
+                 return False, "Could not determine cell centroids"
             
             xc_out = out_ds.createVariable('xc', 'f4', ('icell2d',))
             yc_out = out_ds.createVariable('yc', 'f4', ('icell2d',))

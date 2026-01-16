@@ -2,15 +2,24 @@ from qgis.PyQt import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 import numpy as np
 
+try:
+    from pyqtgraph import PColorMeshItem
+except ImportError:
+    PColorMeshItem = None
+
 class SettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, show_boundaries=False, plot_flat=False):
+    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False, plot_flat=False):
         super().__init__(parent)
         self.setWindowTitle("Cross Section Settings")
         layout = QtWidgets.QVBoxLayout(self)
         
         self.chk_boundaries = QtWidgets.QCheckBox("Show Layer Boundaries")
-        self.chk_boundaries.setChecked(show_boundaries)
+        self.chk_boundaries.setChecked(show_layer_boundaries)
         layout.addWidget(self.chk_boundaries)
+
+        self.chk_cell_boundaries = QtWidgets.QCheckBox("Show Cell Boundaries")
+        self.chk_cell_boundaries.setChecked(show_cell_boundaries)
+        layout.addWidget(self.chk_cell_boundaries)
         
         self.chk_flat = QtWidgets.QCheckBox("Plot Flat Cells")
         self.chk_flat.setChecked(plot_flat)
@@ -35,7 +44,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.current_var = variable_name
         self.cs_label = label
         self.points = points
-        self.show_boundaries = False # Default to False
+        self.show_layer_boundaries = False # Default to False
+        self.show_cell_boundaries = False # Default to False
         self.plot_flat = True # Default to True now
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
@@ -216,14 +226,21 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.render_data(self.data, v_min, v_max)
 
     def show_settings(self):
-        dlg = SettingsDialog(self, show_boundaries=self.show_boundaries, plot_flat=self.plot_flat)
+        dlg = SettingsDialog(self, 
+                             show_layer_boundaries=self.show_layer_boundaries, 
+                             show_cell_boundaries=self.show_cell_boundaries,
+                             plot_flat=self.plot_flat)
         if dlg.exec_():
-            new_boundaries = dlg.chk_boundaries.isChecked()
+            new_layer_boundaries = dlg.chk_boundaries.isChecked()
+            new_cell_boundaries = dlg.chk_cell_boundaries.isChecked()
             new_flat = dlg.chk_flat.isChecked()
             
             changed = False
-            if new_boundaries != self.show_boundaries:
-                self.show_boundaries = new_boundaries
+            if new_layer_boundaries != self.show_layer_boundaries:
+                self.show_layer_boundaries = new_layer_boundaries
+                changed = True
+            if new_cell_boundaries != self.show_cell_boundaries:
+                self.show_cell_boundaries = new_cell_boundaries
                 changed = True
             if new_flat != self.plot_flat:
                 self.plot_flat = new_flat
@@ -316,6 +333,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.info_label.setText("No cell at click location")
 
     def render_data(self, data, v_min=None, v_max=None, vertex_distances=None):
+        """Update the plot with new data and manage internal state."""
+        self.data = data
+        if vertex_distances is not None:
+            self.vertex_distances = vertex_distances
+            
         # Clear previous items
         self.plot_widget.clear()
         if self.colorbar:
@@ -359,16 +381,99 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.v_min_spin.blockSignals(False)
             self.v_max_spin.blockSignals(False)
             self._first_render_done = True
-            
-        # Create Optimized Item
-        self.dataset_item = CrossSectionMeshItem(
-            dists, top, botm, vals, cmap, (v_min, v_max), 
-            show_boundaries=self.show_boundaries,
-            plot_flat=self.plot_flat,
-            indices=data.get('indices') # Pass indices
-        )
-        self.plot_widget.addItem(self.dataset_item)
         
+        # Optimized Rendering using PColorMeshItem if available
+        if PColorMeshItem is not None:
+            num_layers = data['num_layers']
+            num_points = len(dists)
+            
+            # Construct Mesh Coordinates
+            # X: (Layers+1, Points)
+            # Y: (Layers+1, Points)
+            x_mesh = np.tile(dists, (num_layers + 1, 1))
+            y_mesh = np.zeros((num_layers + 1, num_points))
+            y_mesh[0, :] = top
+            y_mesh[1:, :] = botm
+            
+            # Data: (Layers, Points-1)
+            # We use the value from the start of each interval
+            z_mesh = vals[:, :-1]
+            
+            # Apply "Flat Cells" logic to mesh geometry if requested
+            if self.plot_flat and data.get('indices') is not None:
+                indices = data['indices']
+                if isinstance(indices, tuple): # structured
+                    idx_combined = indices[0].astype(np.int64) * 1000000 + indices[1].astype(np.int64)
+                else:
+                    idx_combined = indices
+                
+                # Identify blocks of identical cell indices
+                changes = np.where(idx_combined[1:] != idx_combined[:-1])[0] + 1
+                starts = np.concatenate(([0], changes))
+                ends = np.concatenate((changes, [num_points]))
+                
+                # For each cell block, make top/bottom flat
+                for s, e in zip(starts, ends):
+                    if e > s:
+                        # Use elevation from start of cell block
+                        y_mesh[:, s:e] = y_mesh[:, s][:, None]
+            
+            # Create PColorMeshItem
+            self.dataset_item = PColorMeshItem(
+                x_mesh, y_mesh, z_mesh,
+                colorMap=cmap,
+                levels=(v_min, v_max),
+                antialiasing=False
+            )
+            self.plot_widget.addItem(self.dataset_item)
+            
+            # Add Optional Layer Boundaries using PlotCurveItem (very fast)
+            if self.show_layer_boundaries:
+                pen = pg.mkPen('k', width=1)
+                for i in range(num_layers + 1):
+                    # Filter NaNs for PlotCurveItem
+                    valid = ~np.isnan(y_mesh[i, :])
+                    if np.any(valid):
+                        line = pg.PlotCurveItem(dists[valid], y_mesh[i, valid], pen=pen)
+                        self.plot_widget.addItem(line)
+
+            # Add Optional Cell Boundaries (Vertical lines)
+            if self.show_cell_boundaries and data.get('indices') is not None:
+                pen = pg.mkPen('k', width=1)
+                indices = data['indices']
+                if isinstance(indices, tuple): # structured
+                    idx_combined = indices[0].astype(np.int64) * 1000000 + indices[1].astype(np.int64)
+                else:
+                    idx_combined = indices
+                
+                # Find indices where cell changes
+                changes = np.where(idx_combined[1:] != idx_combined[:-1])[0] + 1
+                for ch in changes:
+                    d = dists[ch]
+                    # Vertical line from top to bottom
+                    z_t = top[ch]
+                    z_b = botm[-1, ch]
+                    if not np.isnan(z_t) and not np.isnan(z_b):
+                        line = pg.PlotCurveItem([d, d], [z_t, z_b], pen=pen)
+                        self.plot_widget.addItem(line)
+        else:
+            # Fallback to slower custom Item
+            self.dataset_item = CrossSectionMeshItem(
+                dists, top, botm, vals, cmap, (v_min, v_max), 
+                show_layer_boundaries=self.show_layer_boundaries,
+                show_cell_boundaries=self.show_cell_boundaries,
+                plot_flat=self.plot_flat,
+                indices=data.get('indices')
+            )
+            self.plot_widget.addItem(self.dataset_item)
+        
+        # Add Vertical Vertex Lines (the A, B, C... points)
+        if vertex_distances:
+            for d in vertex_distances:
+                line = pg.InfiniteLine(pos=d, angle=90, pen=pg.mkPen('k', style=QtCore.Qt.DashLine))
+                self.plot_widget.addItem(line)
+                self.vertex_lines.append(line)
+
         # Add Colorbar
         # Create ColorBarItem
         self.colorbar = pg.ColorBarItem(
@@ -385,16 +490,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.colorbar.getAxis('right').setPen('k')
         self.colorbar.getAxis('right').setTextPen('k')
 
-        # Add Vertical Vertex Lines
-        if vertex_distances:
-            for d in vertex_distances:
-                line = pg.InfiniteLine(pos=d, angle=90, pen=pg.mkPen('k', style=QtCore.Qt.DashLine))
-                self.plot_widget.addItem(line)
-                self.vertex_lines.append(line)
 
 class CrossSectionMeshItem(pg.GraphicsObject):
     def __init__(self, dists, top, botm, vals, cmap, val_range=None, 
-                 show_boundaries=False, plot_flat=False, indices=None):
+                 show_layer_boundaries=False, show_cell_boundaries=False, 
+                 plot_flat=False, indices=None):
         super().__init__()
         self.dists = dists
         self.top = top
@@ -402,7 +502,8 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         self.vals = vals
         self.cmap = cmap
         self.val_range_override = val_range
-        self.show_boundaries = show_boundaries
+        self.show_layer_boundaries = show_layer_boundaries
+        self.show_cell_boundaries = show_cell_boundaries
         self.plot_flat = plot_flat
         self.indices = indices
         self.picture = None
@@ -437,7 +538,8 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         colors = [self.cmap.map(i / (n_bins - 1)) for i in range(n_bins)]
         
         # Boundary line path
-        boundary_path = QtGui.QPainterPath() if self.show_boundaries else None
+        boundary_path = QtGui.QPainterPath() if self.show_layer_boundaries else None
+        cell_boundary_path = QtGui.QPainterPath() if self.show_cell_boundaries else None
 
         for i in range(num_layers):
             if i == 0: l_top_all = self.top
@@ -491,6 +593,15 @@ class CrossSectionMeshItem(pg.GraphicsObject):
                             boundary_path.lineTo(self.dists[j_end+1], z_t)
                             boundary_path.moveTo(self.dists[j], z_b)
                             boundary_path.lineTo(self.dists[j_end+1], z_b)
+                        
+                        if cell_boundary_path and j > 0:
+                            # Draw vertical line at start of cell
+                            cell_boundary_path.moveTo(self.dists[j], z_t)
+                            cell_boundary_path.lineTo(self.dists[j], z_b)
+                        if cell_boundary_path and j_end == num_points - 2:
+                            # Final vertical line
+                            cell_boundary_path.moveTo(self.dists[j_end+1], z_t)
+                            cell_boundary_path.lineTo(self.dists[j_end+1], z_b)
                     
                     j = j_end + 1
                     
@@ -530,12 +641,16 @@ class CrossSectionMeshItem(pg.GraphicsObject):
             p.setBrush(pg.mkBrush(colors[bin_idx]))
             p.drawPath(path)
             
-        # Draw optional boundary lines
         if boundary_path and not boundary_path.isEmpty():
             p.setBrush(pg.mkBrush(None))
             p.setPen(pg.mkPen('k', width=1))
             p.drawPath(boundary_path)
-            
+
+        if cell_boundary_path and not cell_boundary_path.isEmpty():
+            p.setBrush(pg.mkBrush(None))
+            p.setPen(pg.mkPen('k', width=1))
+            p.drawPath(cell_boundary_path)
+        
         p.end()
         
     def paint(self, p, *args):

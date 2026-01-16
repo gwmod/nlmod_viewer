@@ -76,7 +76,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Cross Section List Manager
         self.cs_list = QtWidgets.QListWidget()
         self.cs_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.cs_list.itemClicked.connect(self.highlight_cross_section)
+        self.cs_list.itemSelectionChanged.connect(self.on_cs_selection_changed)
         self.cs_list.itemDoubleClicked.connect(self.raise_cross_section_window)
         cs_layout.addWidget(self.cs_list)
         
@@ -529,6 +529,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 break
 
 
+    def get_or_create_xs_tool(self):
+        """Helper to get or create the cross-section map tool with signals connected."""
+        if not hasattr(self, "xs_tool") or self.xs_tool is None:
+            from .cross_section_tool import CrossSectionMapTool
+            canvas = self.iface.mapCanvas()
+            self.xs_tool = CrossSectionMapTool(canvas)
+            self.xs_tool.line_finished.connect(self.on_cross_section_finished)
+            self.xs_tool.points_changed.connect(self.on_cross_section_changed)
+        return self.xs_tool
+
     def activate_cross_section_tool(self):
         # Check if a variable is selected and has layer dimension
         selected_items = self.var_list.selectedItems()
@@ -559,16 +569,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 return
         
         try:
-            from .cross_section_tool import CrossSectionMapTool
-            
             canvas = self.iface.mapCanvas()
-            self.prev_map_tool = canvas.mapTool()
-            from .cross_section_tool import CrossSectionMapTool
-            self.xs_tool = CrossSectionMapTool(canvas)
-            self.xs_tool.line_finished.connect(self.on_cross_section_finished)
-            self.xs_tool.points_changed.connect(self.on_cross_section_changed)
-            canvas.setMapTool(self.xs_tool)
+            tool = self.get_or_create_xs_tool()
+            
+            if canvas.mapTool() != tool:
+                self.prev_map_tool = canvas.mapTool()
+                canvas.setMapTool(tool)
+            
+            # Reset tool for new drawing
+            tool.set_points([])
             self.active_cs_id = None
+            
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Tool Error", f"Failed to start tool: {e}")
 
@@ -790,22 +801,27 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         self.active_cs_id = item_id
 
-        # If the tool is currently active, load these points into it
-        if hasattr(self, 'xs_tool') and self.iface.mapCanvas().mapTool() == self.xs_tool:
-            try:
-                from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform
-                canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-                model_crs_def = self.handler.get_crs()
-                model_crs = QgsCoordinateReferenceSystem(model_crs_def if model_crs_def else "EPSG:28992")
+        # Ensure tool is active and loaded with these points
+        try:
+            canvas = self.iface.mapCanvas()
+            tool = self.get_or_create_xs_tool()
+            
+            if canvas.mapTool() != tool:
+                self.prev_map_tool = canvas.mapTool()
+                canvas.setMapTool(tool)
+            
+            # Load points into tool for editing
+            # Note: We use the points stored in the plot window if available, 
+            # as they are the most up-to-date canvas points.
+            points = []
+            if item_id in self.plot_windows:
+                points = self.plot_windows[item_id].points
+            else:
+                points = self.cs_geometries.get(item_id, [])
                 
-                points = self.cs_geometries[item_id]
-                if model_crs.isValid() and canvas_crs != model_crs:
-                    xform = QgsCoordinateTransform(model_crs, canvas_crs, QgsProject.instance())
-                    points = [xform.transform(p) for p in points]
-                
-                self.xs_tool.set_points(points)
-            except:
-                self.xs_tool.set_points(self.cs_geometries.get(item_id, []))
+            tool.set_points(points)
+        except Exception as e:
+            QgsMessageLog.logMessage(f"NLMOD: Failed to activate edit tool: {e}", "NlmodInspector", Qgis.Warning)
 
     def raise_cross_section_window(self, item):
         item_id = item.data(QtCore.Qt.UserRole)
@@ -831,8 +847,20 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     item.setText(f"{cs_label}: {new_var_name}")
                 break
 
+    def on_cs_selection_changed(self):
+        """Called when selection in cross-section list changes."""
+        selected = self.cs_list.selectedItems()
+        if selected:
+            self.highlight_cross_section(selected[0])
+
     def remove_cross_section_by_id(self, item_id):
         """Cleanup when plot window is closed directly or removed from list."""
+        # Clear tool if this was the active CS
+        if self.active_cs_id == item_id:
+            self.active_cs_id = None
+            if hasattr(self, 'xs_tool') and self.xs_tool:
+                self.xs_tool.set_points([])
+
         if item_id in self.plot_windows:
             win = self.plot_windows[item_id]
             self.iface.removeDockWidget(win)
@@ -852,7 +880,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         for i in range(self.cs_list.count()):
             item = self.cs_list.item(i)
             if item.data(QtCore.Qt.UserRole) == item_id:
+                # Block signals to avoid recursive selection changes
+                self.cs_list.blockSignals(True)
                 self.cs_list.takeItem(i)
+                self.cs_list.blockSignals(False)
                 break
 
     def remove_cross_section(self):
