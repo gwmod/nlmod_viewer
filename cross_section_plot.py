@@ -8,7 +8,7 @@ except ImportError:
     PColorMeshItem = None
 
 class SettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False, plot_flat=False):
+    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False):
         super().__init__(parent)
         self.setWindowTitle("Cross Section Settings")
         layout = QtWidgets.QVBoxLayout(self)
@@ -21,11 +21,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.chk_cell_boundaries.setChecked(show_cell_boundaries)
         layout.addWidget(self.chk_cell_boundaries)
         
-        self.chk_flat = QtWidgets.QCheckBox("Plot Flat Cells")
-        self.chk_flat.setChecked(plot_flat)
-        self.chk_flat.setToolTip("Renders cells as flat blocks instead of interpolating between centers.")
-        layout.addWidget(self.chk_flat)
-        
         btns = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
             QtCore.Qt.Horizontal, self)
@@ -35,8 +30,12 @@ class SettingsDialog(QtWidgets.QDialog):
 
 class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     variable_changed = QtCore.pyqtSignal(str, str) # item_id, new_var_name
+    cursor_moved = QtCore.pyqtSignal(str, float) # item_id, distance along cross-section
+    cursor_left = QtCore.pyqtSignal()
+    range_changed = QtCore.pyqtSignal()
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
-                 item_id=None, all_vars=None, data_fetcher=None, label="A", points=None):
+                 item_id=None, all_vars=None, data_fetcher=None, label="A", points=None,
+                 z_range=None, v_range=None):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
         self.data_fetcher = data_fetcher
@@ -46,7 +45,6 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.points = points
         self.show_layer_boundaries = False # Default to False
         self.show_cell_boundaries = False # Default to False
-        self.plot_flat = True # Default to True now
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -76,6 +74,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.z_min_spin.setRange(-10000, 10000)
         self.z_min_spin.setDecimals(1)
         self.z_min_spin.valueChanged.connect(self.update_z_range)
+        self.z_min_spin.valueChanged.connect(self.range_changed.emit)
         tools_layout.addWidget(self.z_min_spin)
         
         tools_layout.addWidget(QtWidgets.QLabel(" to "))
@@ -84,6 +83,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.z_max_spin.setRange(-10000, 10000)
         self.z_max_spin.setDecimals(1)
         self.z_max_spin.valueChanged.connect(self.update_z_range)
+        self.z_max_spin.valueChanged.connect(self.range_changed.emit)
         tools_layout.addWidget(self.z_max_spin)
         
         # Spacer
@@ -96,6 +96,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.v_min_spin.setRange(-1e6, 1e6)
         self.v_min_spin.setDecimals(4)
         self.v_min_spin.valueChanged.connect(self.apply_data_range)
+        self.v_min_spin.valueChanged.connect(self.range_changed.emit)
         tools_layout.addWidget(self.v_min_spin)
         
         tools_layout.addWidget(QtWidgets.QLabel(" to "))
@@ -104,6 +105,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.v_max_spin.setRange(-1e6, 1e6)
         self.v_max_spin.setDecimals(4)
         self.v_max_spin.valueChanged.connect(self.apply_data_range)
+        self.v_max_spin.valueChanged.connect(self.range_changed.emit)
         tools_layout.addWidget(self.v_max_spin)
         
         tools_layout.addStretch()
@@ -146,16 +148,18 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.plot_widget.setLabel('bottom', 'Distance', units='m', **styles)
         self.plot_widget.showGrid(x=False, y=False)
         
-        # Add Mouse Click Handler
+        # Add Mouse Handlers
         self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
+        self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
         
         # Render Data
-        self.render_data(data, vertex_distances=vertex_distances)
+        v_min, v_max = (v_range[0], v_range[1]) if v_range else (None, None)
+        self.render_data(data, v_min=v_min, v_max=v_max, vertex_distances=vertex_distances)
         
         # Initialize Range Settings
-        self.init_ranges(data)
+        self.init_ranges(data, z_range=z_range)
 
-    def init_ranges(self, data):
+    def init_ranges(self, data, z_range=None):
         # Calculate elevation extremes from top and botm
         all_z = []
         if 'top' in data: all_z.append(data['top'])
@@ -174,8 +178,14 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 
                 self.z_min_spin.blockSignals(True)
                 self.z_max_spin.blockSignals(True)
-                self.z_min_spin.setValue(self.data_z_min - margin)
-                self.z_max_spin.setValue(self.data_z_max + margin)
+                
+                if z_range:
+                    self.z_min_spin.setValue(z_range[0])
+                    self.z_max_spin.setValue(z_range[1])
+                else:
+                    self.z_min_spin.setValue(self.data_z_min - margin)
+                    self.z_max_spin.setValue(self.data_z_max + margin)
+                    
                 self.z_min_spin.blockSignals(False)
                 self.z_max_spin.blockSignals(False)
                 
@@ -186,6 +196,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         z_max = self.z_max_spin.value()
         if z_max > z_min:
             self.plot_widget.setYRange(z_min, z_max)
+            self.range_changed.emit()
 
     def reset_elevation_range(self):
         if hasattr(self, 'data_z_min'):
@@ -228,12 +239,10 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     def show_settings(self):
         dlg = SettingsDialog(self, 
                              show_layer_boundaries=self.show_layer_boundaries, 
-                             show_cell_boundaries=self.show_cell_boundaries,
-                             plot_flat=self.plot_flat)
+                             show_cell_boundaries=self.show_cell_boundaries)
         if dlg.exec_():
             new_layer_boundaries = dlg.chk_boundaries.isChecked()
             new_cell_boundaries = dlg.chk_cell_boundaries.isChecked()
-            new_flat = dlg.chk_flat.isChecked()
             
             changed = False
             if new_layer_boundaries != self.show_layer_boundaries:
@@ -241,9 +250,6 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 changed = True
             if new_cell_boundaries != self.show_cell_boundaries:
                 self.show_cell_boundaries = new_cell_boundaries
-                changed = True
-            if new_flat != self.plot_flat:
-                self.plot_flat = new_flat
                 changed = True
                 
             if changed:
@@ -281,6 +287,29 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch data for {var_name}: {e}")
 
+    def on_mouse_moved(self, pos):
+        if not self.plot_widget.plotItem.sceneBoundingRect().contains(pos):
+            self.cursor_left.emit()
+            return
+            
+        mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
+        dist = mouse_point.x()
+        
+        # Check if within data range
+        if 'distances' in self.data and len(self.data['distances']) > 0:
+            min_d = self.data['distances'].min()
+            max_d = self.data['distances'].max()
+            if min_d <= dist <= max_d:
+                self.cursor_moved.emit(self.item_id, dist)
+            else:
+                self.cursor_left.emit()
+        else:
+            self.cursor_left.emit()
+
+    def leaveEvent(self, event):
+        self.cursor_left.emit()
+        super().leaveEvent(event)
+
     def on_plot_clicked(self, event):
         if event.button() != QtCore.Qt.LeftButton:
             return
@@ -293,15 +322,19 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         x_click = mouse_point.x()
         z_click = mouse_point.y()
         
-        # Find the point index in distances
+        # Find the segment index in distances
+        # dists has entries [entry0, exit0, entry1, exit1, ...]
         dists = self.data['distances']
         if len(dists) == 0: return
+        idx = np.searchsorted(dists, x_click) - 1
+        idx = max(0, min(idx, len(dists) - 2))
         
-        idx = np.abs(dists - x_click).argmin()
+        # Consistent with flat rendering, we want properties from the start of the cell segment
+        seg_start_idx = idx - (idx % 2)
         
         # Find the layer
-        top = self.data['top'][idx]
-        botm = self.data['botm'][:, idx]
+        top = self.data['top'][seg_start_idx]
+        botm = self.data['botm'][:, seg_start_idx]
         num_layers = self.data['num_layers']
         
         found_layer = -1
@@ -320,9 +353,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 break
         
         if found_layer != -1:
-            val = self.data['values'][found_layer, idx]
-            cx = self.data['cell_x'][idx]
-            cy = self.data['cell_y'][idx]
+            val = self.data['values'][found_layer, seg_start_idx]
+            cx = self.data['cell_x'][seg_start_idx]
+            cy = self.data['cell_y'][seg_start_idx]
             layer_name = self.data['layer_names'][found_layer]
             
             val_str = f"{val:.4f}" if not np.isnan(val) else "NaN"
@@ -399,8 +432,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             # We use the value from the start of each interval
             z_mesh = vals[:, :-1]
             
-            # Apply "Flat Cells" logic to mesh geometry if requested
-            if self.plot_flat and data.get('indices') is not None:
+            # Apply "Flat Cells" logic to mesh geometry
+            if data.get('indices') is not None:
                 indices = data['indices']
                 if isinstance(indices, tuple): # structured
                     idx_combined = indices[0].astype(np.int64) * 1000000 + indices[1].astype(np.int64)
@@ -462,7 +495,6 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 dists, top, botm, vals, cmap, (v_min, v_max), 
                 show_layer_boundaries=self.show_layer_boundaries,
                 show_cell_boundaries=self.show_cell_boundaries,
-                plot_flat=self.plot_flat,
                 indices=data.get('indices')
             )
             self.plot_widget.addItem(self.dataset_item)
@@ -494,7 +526,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
 class CrossSectionMeshItem(pg.GraphicsObject):
     def __init__(self, dists, top, botm, vals, cmap, val_range=None, 
                  show_layer_boundaries=False, show_cell_boundaries=False, 
-                 plot_flat=False, indices=None):
+                 indices=None):
         super().__init__()
         self.dists = dists
         self.top = top
@@ -504,7 +536,6 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         self.val_range_override = val_range
         self.show_layer_boundaries = show_layer_boundaries
         self.show_cell_boundaries = show_cell_boundaries
-        self.plot_flat = plot_flat
         self.indices = indices
         self.picture = None
         self._generate_picture()
@@ -548,8 +579,8 @@ class CrossSectionMeshItem(pg.GraphicsObject):
             
             j = 0
             while j < num_points - 1:
-                # If flat plotting is requested AND we have indices
-                if self.plot_flat and self.indices is not None:
+                # Use flat cell rendering when indices are available
+                if self.indices is not None:
                     # Find span of current cell
                     if isinstance(self.indices, tuple): # structured (yi, xi)
                         curr_idx = (self.indices[0][j], self.indices[1][j])
@@ -606,7 +637,7 @@ class CrossSectionMeshItem(pg.GraphicsObject):
                     j = j_end + 1
                     
                 else:
-                    # Original Interpolated Logic
+                    # Fallback: simple interpolated rendering without indices
                     val = float(self.vals[i, j])
                     if not np.isnan(val):
                         # Skip if geometry is NaN (Out of Domain)

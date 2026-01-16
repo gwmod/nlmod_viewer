@@ -101,6 +101,40 @@ class NetcdfHandler:
             
         self.grid_type = "unknown"
 
+    def get_crs(self):
+        """Attempts to find CRS definition in the NetCDF file."""
+        if not self.ds:
+            return None
+        
+        # 1. Check for 'spatial_ref', 'crs', or 'grid_mapping' variables
+        for name in ['spatial_ref', 'crs', 'grid_mapping']:
+            if name in self.ds.variables:
+                var = self.ds.variables[name]
+                for attr in ['spatial_ref', 'wkt', 'crs_wkt']:
+                    if hasattr(var, attr):
+                        return str(getattr(var, attr))
+                if hasattr(var, 'epsg_code'):
+                    return f"EPSG:{var.epsg_code}"
+                if hasattr(var, 'epsg'):
+                    return f"EPSG:{var.epsg}"
+        
+        # 2. Check for grid_mapping attribute on data variables
+        for var in self.ds.variables.values():
+            if hasattr(var, 'grid_mapping'):
+                gm_name = var.grid_mapping
+                if gm_name in self.ds.variables:
+                    gm_var = self.ds.variables[gm_name]
+                    for attr in ['spatial_ref', 'wkt', 'crs_wkt']:
+                        if hasattr(gm_var, attr):
+                            return str(getattr(gm_var, attr))
+        
+        # 3. Check global attributes
+        for attr in ['crs', 'spatial_ref']:
+            if hasattr(self.ds, attr):
+                return str(getattr(self.ds, attr))
+            
+        return None
+
     def get_variables(self):
         """Returns list of variables that are likely model data (skipping coords)."""
         if not self.ds:
@@ -311,10 +345,13 @@ class NetcdfHandler:
     def _get_centroids(self):
         """Helper to get or calculate centroids for any grid type."""
         import numpy as np
+        # Fallback to file-provided coordinates for structured grids or if vertices missing
         if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
             return self.ds.variables['xc'][:], self.ds.variables['yc'][:]
         
-        # Calculate from vertices if needed (generic approach)
+        # Calculate from vertices if possible (generic geometric approach)
+        # We prefer calculating it to ensure it's the area-weighted centroid, 
+        # as file-provided xc/yc might be simple vertex averages.
         if 'icvert' in self.ds.variables and 'xv' in self.ds.variables and 'yv' in self.ds.variables:
             icv = self.ds.variables['icvert'][:]
             xv = self.ds.variables['xv'][:]
@@ -332,7 +369,11 @@ class NetcdfHandler:
                     v_idx = curr_v[curr_v != nodata]
                     if len(v_idx) >= 3:
                         try:
-                            p = Polygon(zip(xv[v_idx], yv[v_idx]))
+                            # Shapely Polygon handles closure, but we'll be tidy
+                            if len(v_idx) > 1 and v_idx[0] == v_idx[-1]:
+                                p = Polygon(zip(xv[v_idx[:-1]], yv[v_idx[:-1]]))
+                            else:
+                                p = Polygon(zip(xv[v_idx], yv[v_idx]))
                             cent = p.centroid
                             xc[i], yc[i] = cent.x, cent.y
                         except:
@@ -349,6 +390,7 @@ class NetcdfHandler:
                         xc[i] = np.mean(xv[v_idx])
                         yc[i] = np.mean(yv[v_idx])
             return xc, yc
+            
         return None, None
 
     def _get_line_segment_ranges(self, line, intersection_geom):

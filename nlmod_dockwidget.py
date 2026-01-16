@@ -8,6 +8,9 @@ from qgis.core import (
 from .netcdf_handler import NetcdfHandler
 import os
 import tempfile
+import json
+from qgis.PyQt.QtCore import Qt, pyqtSignal, QPointF
+from qgis.core import QgsPointXY, QgsGeometry, QgsWkbTypes
 
 class NlmodDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None, iface=None):
@@ -96,6 +99,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.cs_rubber_bands = {}  # Dictionary to store QgsRubberBand for each CS
         self.active_cs_id = None  # Track which CS is currently being edited/drawn
         self.prev_map_tool = None # Store map tool before activation
+        self.sync_marker = None   # Marker for plot synchronization
+        
+        self.is_restoring = True  # Start in restoring mode to prevent overwrites
+        # Signal connection moved to end of restore_state_from_project
 
     def select_file(self):
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -121,6 +128,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.info_text.setText(self.handler.get_info_text())
             
         self.populate_vars()
+        self.save_state_to_project()
 
     def populate_vars(self):
         self.var_list.clear()
@@ -603,20 +611,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
         return self.handler.get_cross_section_data(var_name, points)
 
-    def on_cross_section_finished(self, points):
-        """Called when user finishes drawing a line."""
+    def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
+                               z_range=None, v_range=None, visible=True):
+        """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
             return
-            
-        # 1. Get selected variable
-        selected_items = self.var_list.selectedItems()
-        if not selected_items:
-            QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
-            return
-            
-        var_name = selected_items[0].data(QtCore.Qt.UserRole)
-        
-        # 2. Get all 3D variables for the combo box in the plot window
+
+        # 1. Get all 3D variables for the combo box
         vars_3d = []
         try:
             all_vars = self.handler.get_variables()
@@ -627,7 +628,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except:
             vars_3d = [var_name]
 
-        # 3. Extract Data (using our new fetcher)
+        # 2. Extract Data
         try:
             data = self.fetch_cross_section_data(var_name, points)
             if not data:
@@ -636,8 +637,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.warning(self, "Error", data["error"])
                 return
                 
-            # 4. Calculate cumulative distances for vertices (in model units)
-            # We need this for the vertical dashed lines
+            # 3. Calculate cumulative distances for vertices (in model units)
             dist_points = points
             try:
                 from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform
@@ -658,16 +658,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 curr_d += ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2)**0.5
                 v_dists.append(curr_d)
 
-            # 5. Add to List Manager
+            # 4. Handle Labels and IDs
             import time
-            item_id = str(time.time())
+            if item_id is None:
+                item_id = str(time.time())
             
-            # Generate Letter Label (A, B, C...)
-            cs_label = self.get_next_cs_label()
+            if cs_label is None:
+                cs_label = self.get_next_cs_label()
             
             from .cross_section_plot import CrossSectionPlotWindow
             
-            # Create Window as DockWidget
+            # Create Window
             win = CrossSectionPlotWindow(
                 data, var_name, 
                 vertex_distances=v_dists, 
@@ -675,16 +676,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 all_vars=vars_3d,
                 data_fetcher=self.fetch_cross_section_data,
                 label=cs_label,
-                points=points # Stores original canvas points for future re-transforms
+                points=points,
+                z_range=z_range,
+                v_range=v_range
             )
             win.variable_changed.connect(self.update_cs_list_label)
+            win.cursor_moved.connect(self.on_cs_cursor_moved)
+            win.cursor_left.connect(self.on_cs_cursor_left)
+            win.range_changed.connect(self.save_state_to_project)
+            win.visibilityChanged.connect(self.save_state_to_project)
             
-            # Restore previous map tool
-            if self.prev_map_tool:
-                self.iface.mapCanvas().setMapTool(self.prev_map_tool)
-                self.prev_map_tool = None
-            
-            # Create Label for List: A: Head
+            # Create Label: A: Head
             display_label = f"{cs_label}: {var_name}"
             
             item = QtWidgets.QListWidgetItem(display_label)
@@ -696,20 +698,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             # Store
             self.plot_windows[item_id] = win
-            self.cs_geometries[item_id] = points  # Store original points
+            self.cs_geometries[item_id] = points 
             self.active_cs_id = item_id
             
             # Dock it in QGIS
             self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, win)
-            win.show()
+            if visible:
+                win.show()
+            else:
+                win.hide()
             
-            # Create RubberBand for map visualization
+            # Create RubberBand
             from qgis.gui import QgsRubberBand
             from qgis.core import QgsWkbTypes
             from qgis.PyQt.QtGui import QColor
             
             rubber_band = QgsRubberBand(self.iface.mapCanvas(), QgsWkbTypes.LineGeometry)
-            rubber_band.setColor(QColor(255, 0, 0, 180))  # Red with transparency
+            rubber_band.setColor(QColor(255, 0, 0, 180)) 
             rubber_band.setWidth(3)
             rubber_band.setLineStyle(QtCore.Qt.DashLine)
             
@@ -719,15 +724,30 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             rubber_band.show()
             self.cs_rubber_bands[item_id] = rubber_band
             
-            # Highlight this new one
             self.highlight_cross_section(item)
-            
-            # Clean up when closed? We could connect a signal, 
-            # but for now explicit removal or app exit is fine.
-            # Ideally: win.closed.connect(lambda: self.cleanup(item_id))
+            self.save_state_to_project()
             
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Plot Error", f"Failed to plot: {e}")
+
+    def on_cross_section_finished(self, points):
+        """Called when user finishes drawing a line."""
+        if not points or len(points) < 2:
+            return
+            
+        selected_items = self.var_list.selectedItems()
+        if not selected_items:
+            QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
+            return
+            
+        var_name = selected_items[0].data(QtCore.Qt.UserRole)
+        
+        # Restore previous map tool
+        if self.prev_map_tool:
+            self.iface.mapCanvas().setMapTool(self.prev_map_tool)
+            self.prev_map_tool = None
+            
+        self.add_cross_section_plot(points, var_name)
 
     def on_cross_section_changed(self, points):
         """Update existing plot window when geometry is edited on map."""
@@ -781,6 +801,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 for p in points:
                     rb.addPoint(p)
                 rb.show()
+            
+            self.save_state_to_project()
                 
         except Exception as e:
             print(f"Error updating cross-section on change: {e}")
@@ -846,6 +868,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     cs_label = self.plot_windows[item_id].cs_label
                     item.setText(f"{cs_label}: {new_var_name}")
                 break
+        self.save_state_to_project()
 
     def on_cs_selection_changed(self):
         """Called when selection in cross-section list changes."""
@@ -876,6 +899,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if item_id in self.cs_geometries:
             del self.cs_geometries[item_id]
             
+        self.save_state_to_project()
+            
         # Also remove from list if it's still there (e.g. if closed via [X] on dock)
         for i in range(self.cs_list.count()):
             item = self.cs_list.item(i)
@@ -885,6 +910,46 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.cs_list.takeItem(i)
                 self.cs_list.blockSignals(False)
                 break
+
+    def clear_all_cross_sections(self):
+        """Removes all cross-sections and resets the plugin state."""
+        self.is_restoring = True # Block auto-saves during mass removal
+        try:
+            # 1. Remove all CS windows and rubber bands
+            ids = list(self.plot_windows.keys())
+            for item_id in ids:
+                # Optimized removal logic similar to remove_cross_section_by_id but without individual saves
+                if item_id in self.plot_windows:
+                    win = self.plot_windows.pop(item_id)
+                    self.iface.removeDockWidget(win)
+                    win.close()
+                    win.deleteLater()
+                
+                if item_id in self.cs_rubber_bands:
+                    rb = self.cs_rubber_bands.pop(item_id)
+                    rb.reset()
+                    self.iface.mapCanvas().scene().removeItem(rb)
+            
+            # 2. Clear dictionaries and lists
+            self.cs_geometries.clear()
+            self.cs_list.clear()
+            self.var_list.clear()
+            self.info_text.clear()
+            self.file_edit.clear()
+            
+            # 3. Close handler
+            if self.handler:
+                self.handler.close()
+                self.handler = None
+            
+            # 4. Reset tool
+            if hasattr(self, 'xs_tool') and self.xs_tool:
+                self.xs_tool.set_points([])
+            
+            self.active_cs_id = None
+            
+        finally:
+            self.is_restoring = False
 
     def remove_cross_section(self):
         selected_items = self.cs_list.selectedItems()
@@ -896,37 +961,159 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         self.remove_cross_section_by_id(item_id)
 
+    def on_cs_cursor_moved(self, item_id, dist):
+        """Show synchronization marker on map when hovering on plot."""
+        if not item_id or item_id not in self.cs_geometries:
+            return
+            
+        points = self.cs_geometries[item_id]
+        if len(points) < 2: return
+        
+        # 1. Coordinate Transform: Canvas -> Model
+        try:
+            from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY
+            from qgis.gui import QgsVertexMarker
+            from qgis.PyQt.QtGui import QColor
+            
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            model_crs_def = self.handler.get_crs()
+            model_crs = QgsCoordinateReferenceSystem(model_crs_def if model_crs_def else "EPSG:28992")
+            
+            xform_to_model = None
+            xform_to_canvas = None
+            if model_crs.isValid() and canvas_crs != model_crs:
+                xform_to_model = QgsCoordinateTransform(canvas_crs, model_crs, QgsProject.instance())
+                xform_to_canvas = QgsCoordinateTransform(model_crs, canvas_crs, QgsProject.instance())
+            
+            # 2. Points in Model CRS
+            m_points = [xform_to_model.transform(p) for p in points] if xform_to_model else points
+            
+            # 3. Find Segment
+            curr_d = 0.0
+            found_p = None
+            for i in range(len(m_points)-1):
+                p1, p2 = m_points[i], m_points[i+1]
+                seg_len = ((p2.x()-p1.x())**2 + (p2.y()-p1.y())**2)**0.5
+                if curr_d <= dist <= curr_d + seg_len + 1e-3:
+                    # Interpolate
+                    if seg_len > 0:
+                        ratio = (dist - curr_d) / seg_len
+                        found_p = QgsPointXY(p1.x() + (p2.x()-p1.x())*ratio, 
+                                            p1.y() + (p2.y()-p1.y())*ratio)
+                    else:
+                        found_p = p1
+                    break
+                curr_d += seg_len
+            
+            if found_p:
+                # 4. Transform back to Canvas
+                canvas_p = xform_to_canvas.transform(found_p) if xform_to_canvas else found_p
+                
+                # 5. Show/Move Marker
+                if not self.sync_marker:
+                    self.sync_marker = QgsVertexMarker(self.iface.mapCanvas())
+                    self.sync_marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+                    self.sync_marker.setPenWidth(3)
+                    self.sync_marker.setIconSize(12)
+                    self.sync_marker.setColor(QColor('yellow'))
+                
+                self.sync_marker.setCenter(canvas_p)
+                self.sync_marker.show()
+                
+        except Exception as e:
+            QgsMessageLog.logMessage(f"NLMOD: Sync marker error: {e}", "NlmodInspector", Qgis.Warning)
+
+    def on_cs_cursor_left(self):
+        if self.sync_marker:
+            self.sync_marker.hide()
+
     def get_next_cs_label(self):
         """Finds the next label based on Max(existing_labels) + 1."""
         existing_labels = []
         for win in self.plot_windows.values():
-            if hasattr(win, 'cs_label'):
-                existing_labels.append(win.cs_label)
+            existing_labels.append(win.cs_label)
         
-        if not existing_labels:
-            return "A"
+        import string
+        alphabet = list(string.ascii_uppercase)
+        
+        for char in alphabet:
+            if char not in existing_labels:
+                return char
+        
+        # Fallback if A-Z are used
+        return f"Z{len(existing_labels)}"
+
+    def save_state_to_project(self):
+        """Saves filepath and cross-sections to the QGIS project."""
+        if self.is_restoring:
+            return
             
-        def label_to_int(lbl):
-            # Very simple A, B, C... Z, A1, B1... converter
-            # For now let's just handle A-Z for simplicity as requested
-            # If we need more, we can use a proper base-26 system
-            if len(lbl) == 1:
-                return ord(lbl) - ord('A')
+        import json
+        from qgis.core import QgsProject
+        filepath = self.file_edit.text()
+        QgsProject.instance().writeEntry("NlmodInspector", "filepath", filepath)
+        
+        is_open = "true" if self.isVisible() else "false"
+        QgsProject.instance().writeEntry("NlmodInspector", "is_open", is_open)
+        
+        cs_list = []
+        for item_id, points in self.cs_geometries.items():
+            win = self.plot_windows.get(item_id)
+            if win:
+                cs_list.append({
+                    'id': item_id,
+                    'label': win.cs_label,
+                    'variable': win.current_var,
+                    'points': [(p.x(), p.y()) for p in points],
+                    'z_range': (win.z_min_spin.value(), win.z_max_spin.value()),
+                    'v_range': (win.v_min_spin.value(), win.v_max_spin.value()),
+                    'visible': win.isVisible()
+                })
+        
+        QgsProject.instance().writeEntry("NlmodInspector", "cross_sections", json.dumps(cs_list))
+
+    def restore_state_from_project(self):
+        """Restores plugin state from project entries."""
+        self.is_restoring = True
+        try:
+            import json
+            import os
+            from qgis.core import QgsProject, QgsPointXY, Qgis, QgsMessageLog
+            
+            filepath, _ = QgsProject.instance().readEntry("NlmodInspector", "filepath", "")
+            QgsMessageLog.logMessage(f"NLMOD: Restoring filepath: {filepath}", "NlmodInspector", Qgis.Info)
+            
+            if filepath and os.path.exists(filepath):
+                self.file_edit.setText(filepath)
+                self.open_netcdf(filepath)
+                
+                cs_json, _ = QgsProject.instance().readEntry("NlmodInspector", "cross_sections", "[]")
+                QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NlmodInspector", Qgis.Info)
+                
+                try:
+                    cs_list = json.loads(cs_json)
+                    for cs in cs_list:
+                        points = [QgsPointXY(p[0], p[1]) for p in cs['points']]
+                        self.add_cross_section_plot(
+                            points, 
+                            cs['variable'], 
+                            cs_label=cs['label'], 
+                            item_id=cs['id'],
+                            z_range=cs.get('z_range'),
+                            v_range=cs.get('v_range'),
+                            visible=cs.get('visible', True)
+                        )
+                except Exception as e:
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)
+            else:
+                if filepath:
+                    QgsMessageLog.logMessage(f"NLMOD: Saved filepath does not exist: {filepath}", "NlmodInspector", Qgis.Warning)
+        finally:
+            self.is_restoring = False
+            # Now safe to connect visibility signal
             try:
-                # Handle things like 'A1' etc if they exist
-                base = ord(lbl[0]) - ord('A')
-                suffix = int(lbl[1:])
-                return (suffix + 1) * 26 + base
+                self.visibilityChanged.disconnect(self.save_state_to_project)
             except:
-                return 0
-
-        def int_to_label(val):
-            if val < 26:
-                return chr(ord('A') + val)
-            suffix = (val // 26) - 1
-            base = val % 26
-            return chr(ord('A') + base) + str(suffix + 1)
-
-        # Get the max integer representation
-        max_val = max(label_to_int(lbl) for lbl in existing_labels)
-        return int_to_label(max_val + 1)
+                pass
+            self.visibilityChanged.connect(self.save_state_to_project)
+            # DO NOT call save_state_to_project() here
