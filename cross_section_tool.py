@@ -1,9 +1,9 @@
-from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand, QgsVertexMarker
-from qgis.core import QgsWkbTypes, QgsPointXY, QgsGeometry
+from qgis.core import QgsWkbTypes, QgsPointXY, QgsGeometry, Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor
+from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
 
-class CrossSectionMapTool(QgsMapToolEmitPoint):
+class CrossSectionMapTool(QgsMapTool):
     # Signal emitted when a line is completed: List of QgsPointXY
     line_finished = pyqtSignal(object) 
     # Signal emitted when points are modified (dragged): List of QgsPointXY
@@ -24,6 +24,7 @@ class CrossSectionMapTool(QgsMapToolEmitPoint):
         self.dragged_vertex_idx = -1
         self.is_moving_all = False
         self.last_mouse_pos = None
+        self.can_draw = False # If false, only edit existing lines
 
     def set_points(self, points):
         """Set existing points for editing."""
@@ -77,9 +78,13 @@ class CrossSectionMapTool(QgsMapToolEmitPoint):
                         return
 
                 # Start new drawing (replaces existing if any)
-                self.points = [point]
-                self.is_drawing = True
-                self.refresh_display()
+                if self.can_draw:
+                    self.points = [point]
+                    self.is_drawing = True
+                    self.refresh_display()
+                else:
+                    # Not in draw mode, skip
+                    pass
             else:
                 # Add point to current drawing
                 self.points.append(point)
@@ -98,14 +103,52 @@ class CrossSectionMapTool(QgsMapToolEmitPoint):
                     self.points = []
                     self.refresh_display()
             else:
-                # Edit mode: Check for vertex removal
+                # Edit mode: Context Menu
+                # 1. Check if on vertex
+                vertex_idx = -1
                 for i, p in enumerate(self.points):
                     if self.is_close(point, p):
-                        if len(self.points) > 2:
-                            self.points.pop(i)
-                            self.refresh_display()
-                            self.points_changed.emit(self.points)
-                        return
+                        vertex_idx = i
+                        break
+                
+                # 2. Check if on segment
+                segment_info = None
+                if vertex_idx == -1:
+                    geom = QgsGeometry.fromPolylineXY(self.points)
+                    dist_tol = self.canvas.mapSettings().mapUnitsPerPixel() * 15
+                    res = geom.closestSegmentWithContext(point)
+                    if res[0]**0.5 < dist_tol:
+                        segment_info = res # (sqDist, closestPoint, afterVertex, leftOf)
+
+                # 3. Build and show Menu
+                from qgis.PyQt.QtWidgets import QMenu, QAction
+                menu = QMenu(self.canvas)
+                
+                if vertex_idx != -1:
+                    action_remove = QAction("Remove point", menu)
+                    action_remove.triggered.connect(lambda: self.remove_vertex(vertex_idx))
+                    # Only allow removal if we have more than 2 points
+                    action_remove.setEnabled(len(self.points) > 2)
+                    menu.addAction(action_remove)
+                elif segment_info:
+                    action_add = QAction("Add point", menu)
+                    # after_vertex is res[2]
+                    action_add.triggered.connect(lambda: self.add_vertex(segment_info[2], point))
+                    menu.addAction(action_add)
+                
+                if not menu.isEmpty():
+                    menu.exec_(e.globalPos())
+
+    def remove_vertex(self, idx):
+        if len(self.points) > 2:
+            self.points.pop(idx)
+            self.refresh_display()
+            self.points_changed.emit(self.points)
+
+    def add_vertex(self, idx, point):
+        self.points.insert(idx, point)
+        self.refresh_display()
+        self.points_changed.emit(self.points)
 
     def is_close(self, p1, p2):
         # Pixel-based tolerance for selection
@@ -143,21 +186,8 @@ class CrossSectionMapTool(QgsMapToolEmitPoint):
             self.points_changed.emit(self.points)
 
     def canvasDoubleClickEvent(self, e):
-        if self.is_drawing or not self.points:
-            return
-            
-        point = self.toMapCoordinates(e.pos())
-        geom = QgsGeometry.fromPolylineXY(self.points)
-        dist_tol = self.canvas.mapSettings().mapUnitsPerPixel() * 10
-        
-        sq_dist, closest_pt, after_vertex, left_of = geom.closestSegmentWithContext(point)
-        
-        if sq_dist**0.5 < dist_tol:
-            # Insert point into the list
-            # after_vertex is the index of the vertex AT THE END of the segment
-            self.points.insert(after_vertex, point)
-            self.refresh_display()
-            self.points_changed.emit(self.points)
+        # We now use right-click context menu for vertex operations
+        pass
 
     def deactivate(self):
         self.rubberBand.reset(QgsWkbTypes.LineGeometry)

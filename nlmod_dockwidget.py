@@ -72,20 +72,25 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         cs_layout = QtWidgets.QVBoxLayout()
         cs_group.setLayout(cs_layout)
         
-        self.btn_cross_section = QtWidgets.QPushButton("Add Cross-Section")
+        cs_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_cross_section = QtWidgets.QPushButton("Add")
         self.btn_cross_section.clicked.connect(self.activate_cross_section_tool)
-        cs_layout.addWidget(self.btn_cross_section)
+        cs_btn_layout.addWidget(self.btn_cross_section)
+        
+        self.btn_remove_cs = QtWidgets.QPushButton("Remove")
+        self.btn_remove_cs.setEnabled(False) # Default disabled
+        self.btn_remove_cs.clicked.connect(self.remove_cross_section)
+        cs_btn_layout.addWidget(self.btn_remove_cs)
+        
+        cs_layout.addLayout(cs_btn_layout)
         
         # Cross Section List Manager
         self.cs_list = QtWidgets.QListWidget()
         self.cs_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.cs_list.itemSelectionChanged.connect(self.on_cs_selection_changed)
+        self.cs_list.itemSelectionChanged.connect(self.update_ui_state) # Track button enablement
         self.cs_list.itemDoubleClicked.connect(self.raise_cross_section_window)
         cs_layout.addWidget(self.cs_list)
-        
-        self.btn_remove_cs = QtWidgets.QPushButton("Remove Cross-Section")
-        self.btn_remove_cs.clicked.connect(self.remove_cross_section)
-        cs_layout.addWidget(self.btn_remove_cs)
         
         layout.addWidget(cs_group)
         
@@ -584,6 +589,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.prev_map_tool = canvas.mapTool()
                 canvas.setMapTool(tool)
             
+            # Allow new drawing
+            tool.can_draw = True
+            
             # Reset tool for new drawing
             tool.set_points([])
             self.active_cs_id = None
@@ -612,7 +620,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         return self.handler.get_cross_section_data(var_name, points)
 
     def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
-                               z_range=None, v_range=None, visible=True):
+                               z_range=None, v_range=None, visible=True,
+                               show_layers=True, show_cells=False):
         """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
             return
@@ -678,13 +687,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 label=cs_label,
                 points=points,
                 z_range=z_range,
-                v_range=v_range
+                v_range=v_range,
+                show_layers=show_layers,
+                show_cells=show_cells
             )
             win.variable_changed.connect(self.update_cs_list_label)
             win.cursor_moved.connect(self.on_cs_cursor_moved)
             win.cursor_left.connect(self.on_cs_cursor_left)
             win.range_changed.connect(self.save_state_to_project)
             win.visibilityChanged.connect(self.save_state_to_project)
+            win.settings_changed.connect(self.save_state_to_project)
             
             # Create Label: A: Head
             display_label = f"{cs_label}: {var_name}"
@@ -747,6 +759,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.iface.mapCanvas().setMapTool(self.prev_map_tool)
             self.prev_map_tool = None
             
+        # Disable further drawing until Add is pressed again
+        if hasattr(self, 'xs_tool') and self.xs_tool:
+            self.xs_tool.can_draw = False
+
         self.add_cross_section_plot(points, var_name)
 
     def on_cross_section_changed(self, points):
@@ -827,6 +843,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         try:
             canvas = self.iface.mapCanvas()
             tool = self.get_or_create_xs_tool()
+            
+            # If we are highlighting, we are in edit mode, so disable new drawing
+            tool.can_draw = False
             
             if canvas.mapTool() != tool:
                 self.prev_map_tool = canvas.mapTool()
@@ -910,6 +929,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.cs_list.takeItem(i)
                 self.cs_list.blockSignals(False)
                 break
+        self.update_ui_state()
+
+    def update_ui_state(self):
+        """Enable/Disable buttons based on current state."""
+        has_selection = len(self.cs_list.selectedItems()) > 0
+        self.btn_remove_cs.setEnabled(has_selection)
 
     def clear_all_cross_sections(self):
         """Removes all cross-sections and resets the plugin state."""
@@ -1067,7 +1092,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     'points': [(p.x(), p.y()) for p in points],
                     'z_range': (win.z_min_spin.value(), win.z_max_spin.value()),
                     'v_range': (win.v_min_spin.value(), win.v_max_spin.value()),
-                    'visible': win.isVisible()
+                    'visible': win.isVisible(),
+                    'show_layers': win.show_layer_boundaries,
+                    'show_cells': win.show_cell_boundaries
                 })
         
         QgsProject.instance().writeEntry("NlmodInspector", "cross_sections", json.dumps(cs_list))
@@ -1101,7 +1128,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             item_id=cs['id'],
                             z_range=cs.get('z_range'),
                             v_range=cs.get('v_range'),
-                            visible=cs.get('visible', True)
+                            visible=cs.get('visible', True),
+                            show_layers=cs.get('show_layers', True),
+                            show_cells=cs.get('show_cells', False)
                         )
                 except Exception as e:
                     QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)

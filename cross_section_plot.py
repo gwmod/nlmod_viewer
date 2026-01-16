@@ -33,9 +33,10 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     cursor_moved = QtCore.pyqtSignal(str, float) # item_id, distance along cross-section
     cursor_left = QtCore.pyqtSignal()
     range_changed = QtCore.pyqtSignal()
+    settings_changed = QtCore.pyqtSignal()
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
                  item_id=None, all_vars=None, data_fetcher=None, label="A", points=None,
-                 z_range=None, v_range=None):
+                 z_range=None, v_range=None, show_layers=True, show_cells=False):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
         self.data_fetcher = data_fetcher
@@ -43,8 +44,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.current_var = variable_name
         self.cs_label = label
         self.points = points
-        self.show_layer_boundaries = False # Default to False
-        self.show_cell_boundaries = False # Default to False
+        self.show_layer_boundaries = show_layers 
+        self.show_cell_boundaries = show_cells
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -257,6 +258,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 self.info_label.setText("Click in plot to see cell info")
                 # Re-render
                 self.render_data(self.data, vertex_distances=self.vertex_distances)
+                # Save
+                self.settings_changed.emit()
 
     def change_variable(self, var_name):
         if not self.data_fetcher:
