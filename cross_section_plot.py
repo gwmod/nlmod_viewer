@@ -1,4 +1,5 @@
 from qgis.PyQt import QtWidgets, QtCore, QtGui
+from qgis.core import QgsStyle
 import pyqtgraph as pg
 import numpy as np
 
@@ -8,18 +9,94 @@ except ImportError:
     PColorMeshItem = None
 
 class SettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False):
+    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False,
+                 v_min=None, v_max=None, use_log=False, cmap_name='Turbo', invert_cmap=False):
         super().__init__(parent)
         self.setWindowTitle("Cross Section Settings")
         layout = QtWidgets.QVBoxLayout(self)
         
+        # Appearance Group
+        appearance_group = QtWidgets.QGroupBox("Appearance")
+        app_layout = QtWidgets.QVBoxLayout(appearance_group)
         self.chk_boundaries = QtWidgets.QCheckBox("Show Layer Boundaries")
         self.chk_boundaries.setChecked(show_layer_boundaries)
-        layout.addWidget(self.chk_boundaries)
+        app_layout.addWidget(self.chk_boundaries)
 
         self.chk_cell_boundaries = QtWidgets.QCheckBox("Show Cell Boundaries")
         self.chk_cell_boundaries.setChecked(show_cell_boundaries)
-        layout.addWidget(self.chk_cell_boundaries)
+        app_layout.addWidget(self.chk_cell_boundaries)
+        layout.addWidget(appearance_group)
+        
+        # Color Scale Group
+        scale_group = QtWidgets.QGroupBox("Color Scale")
+        scale_layout = QtWidgets.QVBoxLayout(scale_group)
+        
+        range_layout = QtWidgets.QHBoxLayout()
+        range_layout.addWidget(QtWidgets.QLabel("Data Range:"))
+        self.v_min_spin = QtWidgets.QDoubleSpinBox()
+        self.v_min_spin.setRange(-1e9, 1e9)
+        self.v_min_spin.setDecimals(4)
+        if v_min is not None: self.v_min_spin.setValue(v_min)
+        range_layout.addWidget(self.v_min_spin)
+        
+        range_layout.addWidget(QtWidgets.QLabel(" to "))
+        
+        self.v_max_spin = QtWidgets.QDoubleSpinBox()
+        self.v_max_spin.setRange(-1e9, 1e9)
+        self.v_max_spin.setDecimals(4)
+        if v_max is not None: self.v_max_spin.setValue(v_max)
+        range_layout.addWidget(self.v_max_spin)
+        scale_layout.addLayout(range_layout)
+        
+        self.chk_log = QtWidgets.QCheckBox("Use Log Scale")
+        self.chk_log.setChecked(use_log)
+        scale_layout.addWidget(self.chk_log)
+        
+        cmap_layout = QtWidgets.QHBoxLayout()
+        cmap_layout.addWidget(QtWidgets.QLabel("Colormap:"))
+        self.cmap_combo = QtWidgets.QComboBox()
+        self.cmap_combo.setIconSize(QtCore.QSize(80, 16))
+        
+        # Manually populate with QGIS ramps and previews
+        style = QgsStyle.defaultStyle()
+        ramp_names = style.colorRampNames()
+        icon_w, icon_h = 80, 16
+        for name in ramp_names:
+            ramp = style.colorRamp(name)
+            if ramp:
+                try:
+                    # Manually create preview pixmap as the API method is not always available
+                    pixmap = QtGui.QPixmap(icon_w, icon_h)
+                    painter = QtGui.QPainter(pixmap)
+                    for i in range(icon_w):
+                        qcolor = ramp.color(i / (icon_w - 1))
+                        painter.setPen(qcolor)
+                        painter.drawLine(i, 0, i, icon_h)
+                    painter.end()
+                    icon = QtGui.QIcon(pixmap)
+                    self.cmap_combo.addItem(icon, name)
+                except Exception:
+                    self.cmap_combo.addItem(name)
+        
+        if cmap_name:
+            idx = self.cmap_combo.findText(cmap_name)
+            if idx >= 0:
+                self.cmap_combo.setCurrentIndex(idx)
+        else:
+            # Try to default to Turbo
+            idx = self.cmap_combo.findText('Turbo')
+            if idx >= 0:
+                self.cmap_combo.setCurrentIndex(idx)
+            
+        cmap_layout.addWidget(self.cmap_combo)
+        
+        self.chk_invert = QtWidgets.QCheckBox("Invert")
+        self.chk_invert.setChecked(invert_cmap)
+        cmap_layout.addWidget(self.chk_invert)
+        
+        scale_layout.addLayout(cmap_layout)
+        
+        layout.addWidget(scale_group)
         
         btns = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
@@ -36,7 +113,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     settings_changed = QtCore.pyqtSignal()
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
                  item_id=None, all_vars=None, data_fetcher=None, label="A", points=None,
-                 z_range=None, v_range=None, show_layers=True, show_cells=False):
+                 z_range=None, v_range=None, show_layers=True, show_cells=False,
+                 use_log=False, cmap_name='Turbo', invert_cmap=False):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
         self.data_fetcher = data_fetcher
@@ -46,6 +124,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.points = points
         self.show_layer_boundaries = show_layers 
         self.show_cell_boundaries = show_cells
+        self.use_log = use_log
+        self.cmap_name = cmap_name
+        self.invert_cmap = invert_cmap
+        self.v_min = v_range[0] if v_range else None
+        self.v_max = v_range[1] if v_range else None
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -90,24 +173,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # Spacer
         tools_layout.addSpacing(20)
         
-        # Data Range
-        tools_layout.addWidget(QtWidgets.QLabel("Data Range:"))
-        
-        self.v_min_spin = QtWidgets.QDoubleSpinBox()
-        self.v_min_spin.setRange(-1e6, 1e6)
-        self.v_min_spin.setDecimals(4)
-        self.v_min_spin.valueChanged.connect(self.apply_data_range)
-        self.v_min_spin.valueChanged.connect(self.range_changed.emit)
-        tools_layout.addWidget(self.v_min_spin)
-        
-        tools_layout.addWidget(QtWidgets.QLabel(" to "))
-        
-        self.v_max_spin = QtWidgets.QDoubleSpinBox()
-        self.v_max_spin.setRange(-1e6, 1e6)
-        self.v_max_spin.setDecimals(4)
-        self.v_max_spin.valueChanged.connect(self.apply_data_range)
-        self.v_max_spin.valueChanged.connect(self.range_changed.emit)
-        tools_layout.addWidget(self.v_max_spin)
+        # Spacer
+        tools_layout.addStretch()
         
         tools_layout.addStretch()
         
@@ -154,8 +221,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
         
         # Render Data
-        v_min, v_max = (v_range[0], v_range[1]) if v_range else (None, None)
-        self.render_data(data, v_min=v_min, v_max=v_max, vertex_distances=vertex_distances)
+        self.render_data(data, v_min=self.v_min, v_max=self.v_max, vertex_distances=vertex_distances)
         
         # Initialize Range Settings
         self.init_ranges(data, z_range=z_range)
@@ -212,45 +278,51 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.z_max_spin.blockSignals(False)
             self.update_z_range()
 
-    def reset_data_range(self):
-        valid_vals = self.data['values'][~np.isnan(self.data['values'])]
-        if len(valid_vals) > 0:
-            v_min = np.nanmin(valid_vals)
-            v_max = np.nanmax(valid_vals)
-            
-            self.v_min_spin.blockSignals(True)
-            self.v_max_spin.blockSignals(True)
-            self.v_min_spin.setValue(v_min)
-            self.v_max_spin.setValue(v_max)
-            self.v_min_spin.blockSignals(False)
-            self.v_max_spin.blockSignals(False)
-            self.apply_data_range()
-
     def reset_ranges(self):
         self.reset_elevation_range()
-        self.reset_data_range()
+        # Reset data range
+        valid_vals = self.data['values'][~np.isnan(self.data['values'])]
+        if len(valid_vals) > 0:
+            self.v_min = np.nanmin(valid_vals)
+            self.v_max = np.nanmax(valid_vals)
+            self.render_data(self.data, self.v_min, self.v_max)
+            self.range_changed.emit()
 
     def apply_data_range(self):
-        v_min = self.v_min_spin.value()
-        v_max = self.v_max_spin.value()
-        if v_max > v_min:
-            # Re-render with new limits
-            self.render_data(self.data, v_min, v_max)
+        # Re-render with existing limits
+        self.render_data(self.data, self.v_min, self.v_max)
 
     def show_settings(self):
         dlg = SettingsDialog(self, 
                              show_layer_boundaries=self.show_layer_boundaries, 
-                             show_cell_boundaries=self.show_cell_boundaries)
+                             show_cell_boundaries=self.show_cell_boundaries,
+                             v_min=self.v_min, v_max=self.v_max, use_log=self.use_log,
+                             cmap_name=self.cmap_name, invert_cmap=self.invert_cmap)
         if dlg.exec_():
             new_layer_boundaries = dlg.chk_boundaries.isChecked()
             new_cell_boundaries = dlg.chk_cell_boundaries.isChecked()
+            new_v_min = dlg.v_min_spin.value()
+            new_v_max = dlg.v_max_spin.value()
+            new_use_log = dlg.chk_log.isChecked()
+            new_cmap = dlg.cmap_combo.currentText()
+            new_invert = dlg.chk_invert.isChecked()
             
             changed = False
-            if new_layer_boundaries != self.show_layer_boundaries:
+            if (new_layer_boundaries != self.show_layer_boundaries or 
+                new_cell_boundaries != self.show_cell_boundaries or
+                new_v_min != self.v_min or
+                new_v_max != self.v_max or
+                new_use_log != self.use_log or
+                new_cmap != self.cmap_name or
+                new_invert != self.invert_cmap):
+                
                 self.show_layer_boundaries = new_layer_boundaries
-                changed = True
-            if new_cell_boundaries != self.show_cell_boundaries:
                 self.show_cell_boundaries = new_cell_boundaries
+                self.v_min = new_v_min
+                self.v_max = new_v_max
+                self.use_log = new_use_log
+                self.cmap_name = new_cmap
+                self.invert_cmap = new_invert
                 changed = True
                 
             if changed:
@@ -260,6 +332,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 self.render_data(self.data, vertex_distances=self.vertex_distances)
                 # Save
                 self.settings_changed.emit()
+                self.range_changed.emit()
 
     def change_variable(self, var_name):
         if not self.data_fetcher:
@@ -276,14 +349,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 # Clear info
                 self.info_label.setText("Click in plot to see cell info")
                 
-                # Re-render (using auto-range for the first time on new var)
-                if hasattr(self, '_first_render_done'):
-                    delattr(self, '_first_render_done')
-                
                 self.render_data(self.data, vertex_distances=self.vertex_distances)
-                # Keep Z range per user request
-                self.reset_data_range() 
-                
                 # Notify dock widget
                 if self.item_id:
                     self.variable_changed.emit(self.item_id, var_name)
@@ -329,6 +395,12 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # dists has entries [entry0, exit0, entry1, exit1, ...]
         dists = self.data['distances']
         if len(dists) == 0: return
+        
+        # Check if click is outside cross-section distance
+        if x_click < dists[0] or x_click > dists[-1]:
+            self.info_label.setText("No cell at click location")
+            return
+            
         idx = np.searchsorted(dists, x_click) - 1
         idx = max(0, min(idx, len(dists) - 2))
         
@@ -361,12 +433,52 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             cy = self.data['cell_y'][seg_start_idx]
             layer_name = self.data['layer_names'][found_layer]
             
+            indices = self.data.get('indices')
+            cell_id_str = ""
+            if indices is not None:
+                if isinstance(indices, tuple):
+                    # Structured: (yi, xi)
+                    r = indices[0][seg_start_idx]
+                    c = indices[1][seg_start_idx]
+                    cell_id_str = f"Row: {r}, Col: {c}, "
+                else:
+                    # Vertex: icell2d
+                    icell2d = indices[seg_start_idx]
+                    cell_id_str = f"Icell2d: {icell2d}, "
+
             val_str = f"{val:.4f}" if not np.isnan(val) else "NaN"
             self.info_label.setText(
-                f"X: {cx:.1f}, Y: {cy:.1f}, Layer: {layer_name}, Value: {val_str}"
+                f"X: {cx:.1f}, Y: {cy:.1f}, Layer: {layer_name}, {cell_id_str}Value: {val_str}"
             )
         else:
             self.info_label.setText("No cell at click location")
+
+    def get_pyqtgraph_cmap(self, ramp_name, invert=False):
+        """Converts a QGIS color ramp to a pyqtgraph ColorMap."""
+        try:
+            style = QgsStyle.defaultStyle()
+            ramp = style.colorRamp(ramp_name)
+            
+            if not ramp:
+                # Fallback
+                return pg.colormap.get('turbo')
+            
+            # Sample the ramp
+            n_samples = 256
+            stops = []
+            colors = []
+            
+            for i in range(n_samples):
+                val = i / (n_samples - 1)
+                # Apply inversion if requested
+                sample_val = 1.0 - val if invert else val
+                qcolor = ramp.color(sample_val)
+                stops.append(val)
+                colors.append([qcolor.red(), qcolor.green(), qcolor.blue(), qcolor.alpha()])
+            
+            return pg.ColorMap(stops, np.array(colors))
+        except Exception:
+            return pg.colormap.get('turbo')
 
     def render_data(self, data, v_min=None, v_max=None, vertex_distances=None):
         """Update the plot with new data and manage internal state."""
@@ -389,33 +501,30 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         vals = data['values']
         
         # Color Map
-        cmap = pg.colormap.get('turbo')
+        cmap = self.get_pyqtgraph_cmap(self.cmap_name, invert=self.invert_cmap)
         
         # Data Range
-        valid_vals = vals[~np.isnan(vals)]
+        # Exclude both NaNs and Infs for range calculation
+        valid_vals = vals[np.isfinite(vals)]
         if len(valid_vals) == 0:
             return
             
         if v_min is None:
             if hasattr(self, '_first_render_done'):
-                v_min = self.v_min_spin.value()
+                v_min = self.v_min
             else:
                 v_min = np.nanmin(valid_vals)
                 
         if v_max is None:
             if hasattr(self, '_first_render_done'):
-                v_max = self.v_max_spin.value()
+                v_max = self.v_max
             else:
                 v_max = np.nanmax(valid_vals)
         
-        # Update spinboxes if this is first render
+        # Update internal state if this is first render
         if not hasattr(self, '_first_render_done'):
-            self.v_min_spin.blockSignals(True)
-            self.v_max_spin.blockSignals(True)
-            self.v_min_spin.setValue(v_min)
-            self.v_max_spin.setValue(v_max)
-            self.v_min_spin.blockSignals(False)
-            self.v_max_spin.blockSignals(False)
+            self.v_min = v_min
+            self.v_max = v_max
             self._first_render_done = True
         
         # Optimized Rendering using PColorMeshItem if available
@@ -434,6 +543,16 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             # Data: (Layers, Points-1)
             # We use the value from the start of each interval
             z_mesh = vals[:, :-1]
+            
+            # Handle Log Scale
+            render_min, render_max = v_min, v_max
+            if self.use_log:
+                # Map data to log space. 
+                # Use a small epsilon for values <= 0
+                epsilon = 1e-10
+                z_mesh = np.log10(np.where(z_mesh > epsilon, z_mesh, epsilon))
+                render_min = np.log10(max(v_min, epsilon))
+                render_max = np.log10(max(v_max, epsilon))
             
             # Apply "Flat Cells" logic to mesh geometry
             if data.get('indices') is not None:
@@ -458,9 +577,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.dataset_item = PColorMeshItem(
                 x_mesh, y_mesh, z_mesh,
                 colorMap=cmap,
-                levels=(v_min, v_max),
                 antialiasing=False
             )
+            self.dataset_item.setLevels((render_min, render_max))
             self.plot_widget.addItem(self.dataset_item)
             
             # Add Optional Layer Boundaries using PlotCurveItem (very fast)
@@ -498,7 +617,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 dists, top, botm, vals, cmap, (v_min, v_max), 
                 show_layer_boundaries=self.show_layer_boundaries,
                 show_cell_boundaries=self.show_cell_boundaries,
-                indices=data.get('indices')
+                indices=data.get('indices'),
+                use_log=self.use_log
             )
             self.plot_widget.addItem(self.dataset_item)
         
@@ -512,24 +632,41 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # Add Colorbar
         # Create ColorBarItem
         self.colorbar = pg.ColorBarItem(
-            values=(v_min, v_max),
             colorMap=cmap,
             width=15,
             interactive=False
         )
+        self.colorbar.setLevels((render_min, render_max))
         
         # Add directly to plot layout (row 2, column 3 = right side)
         self.plot_widget.plotItem.layout.addItem(self.colorbar, 2, 3)
         
         # Style the colorbar axis
-        self.colorbar.getAxis('right').setPen('k')
-        self.colorbar.getAxis('right').setTextPen('k')
+        axis = self.colorbar.getAxis('right')
+        axis.setPen('k')
+        axis.setTextPen('k')
+        
+        if self.use_log:
+            # Custom formatter to show real values (10^x)
+            def log_formatter(values, scale, spacing):
+                labels = []
+                for v in values:
+                    try:
+                        real_val = 10**v
+                        if 0.01 <= real_val <= 1000:
+                            labels.append(f"{real_val:.2f}".rstrip('0').rstrip('.'))
+                        else:
+                            labels.append(f"{real_val:.2e}")
+                    except:
+                        labels.append("")
+                return labels
+            axis.tickStrings = log_formatter
 
 
 class CrossSectionMeshItem(pg.GraphicsObject):
     def __init__(self, dists, top, botm, vals, cmap, val_range=None, 
                  show_layer_boundaries=False, show_cell_boundaries=False, 
-                 indices=None):
+                 indices=None, use_log=False):
         super().__init__()
         self.dists = dists
         self.top = top
@@ -540,6 +677,7 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         self.show_layer_boundaries = show_layer_boundaries
         self.show_cell_boundaries = show_cell_boundaries
         self.indices = indices
+        self.use_log = use_log
         self.picture = None
         self._generate_picture()
         
@@ -552,12 +690,17 @@ class CrossSectionMeshItem(pg.GraphicsObject):
         if self.val_range_override:
             min_val, max_val = self.val_range_override
         else:
-            valid_vals = self.vals[~np.isnan(self.vals)]
+            valid_vals = self.vals[np.isfinite(self.vals)]
             if len(valid_vals) == 0:
                 p.end()
                 return
             min_val = np.nanmin(valid_vals)
             max_val = np.nanmax(valid_vals)
+            
+        if self.use_log:
+            epsilon = 1e-10
+            min_val = np.log10(max(min_val, epsilon))
+            max_val = np.log10(max(max_val, epsilon))
             
         val_range = max_val - min_val if max_val > min_val else 1.0
         
@@ -603,6 +746,9 @@ class CrossSectionMeshItem(pg.GraphicsObject):
                     
                     # Properties from start of span
                     val = float(self.vals[i, j])
+                    if self.use_log:
+                        epsilon = 1e-10
+                        val = np.log10(max(val, epsilon))
                     z_t = l_top_all[j]
                     z_b = l_bot_all[j]
                     
@@ -642,6 +788,9 @@ class CrossSectionMeshItem(pg.GraphicsObject):
                 else:
                     # Fallback: simple interpolated rendering without indices
                     val = float(self.vals[i, j])
+                    if self.use_log:
+                        epsilon = 1e-10
+                        val = np.log10(max(val, epsilon))
                     if not np.isnan(val):
                         # Skip if geometry is NaN (Out of Domain)
                         z_t1, z_t2 = l_top_all[j], l_top_all[j+1]

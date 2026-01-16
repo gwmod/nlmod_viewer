@@ -18,10 +18,21 @@ except ImportError:
     shapely = None
 
 class NetcdfHandler:
+    def _get_topology_var(self, name):
+        """Helper to get and cache topology variables."""
+        if name in self._cache:
+            return self._cache[name]
+        if name in self.ds.variables:
+            val = self.ds.variables[name][:]
+            self._cache[name] = val
+            return val
+        return None
+
     def __init__(self, filepath):
         self.filepath = filepath
         self.ds = None
         self.grid_type = "unknown"
+        self._cache = {} # Cache for topology and spatial index
 
     def open(self):
         if not os.path.exists(self.filepath):
@@ -50,6 +61,7 @@ class NetcdfHandler:
         if self.ds:
             self.ds.close()
             self.ds = None
+        self._cache = {} # Clear cache
 
     def detect_grid_type(self):
         # Heuristics for nlmod / UGRID / MODFLOW 6
@@ -135,6 +147,54 @@ class NetcdfHandler:
             
         return None
 
+    def get_dimensions_metadata(self):
+        """Returns metadata for all available dimensions (layers, times) in the file."""
+        if not self.ds:
+            return {"layers": [], "times": []}
+            
+        layers = []
+        times = []
+        
+        possible_layers = {'layer', 'lev', 'level', 'z'}
+        possible_times = {'time', 't', 'date'}
+        
+        # Look for these dimensions in the variables
+        for d in self.ds.dimensions:
+            if d.lower() in possible_layers:
+                # Get values from variable if it exists
+                if d in self.ds.variables:
+                    vals = self.ds.variables[d][:]
+                    layers = [str(v) for v in vals]
+                if not layers:
+                    layers = [str(i+1) for i in range(self.ds.dimensions[d].size)]
+            
+            if d.lower() in possible_times:
+                if d in self.ds.variables:
+                    t_var = self.ds.variables[d]
+                    vals = t_var[:]
+                    try:
+                        import netCDF4
+                        import numpy as np
+                        if hasattr(t_var, 'units'):
+                            cal = getattr(t_var, 'calendar', 'standard')
+                            dates = netCDF4.num2date(vals, units=t_var.units, calendar=cal)
+                            def fmt(dt):
+                                if hasattr(dt, 'strftime'):
+                                    return dt.strftime('%Y-%m-%d %H:%M:%S') if dt.hour or dt.minute else dt.strftime('%Y-%m-%d')
+                                return str(dt)
+                            if isinstance(dates, (list, np.ndarray)):
+                                times = [fmt(dt) for dt in dates]
+                            else:
+                                times = [fmt(dates)]
+                        else:
+                            times = [str(v) for v in vals]
+                    except:
+                        times = [str(v) for v in vals]
+                if not times:
+                    times = [str(i+1) for i in range(self.ds.dimensions[d].size)]
+                    
+        return {"layers": layers, "times": times}
+
     def get_variables(self):
         """Returns list of variables that are likely model data (skipping coords)."""
         if not self.ds:
@@ -167,29 +227,57 @@ class NetcdfHandler:
             layer_size = 0
             layer_values = []
             possible_layers = {'layer', 'lev', 'level', 'z'}
+            
+            # Detect time dim
+            time_dim = None
+            time_size = 0
+            time_values = []
+            possible_times = {'time', 't', 'date'}
+
             for d in var.dimensions:
                 if d in possible_layers:
                     layer_dim = d
                     if d in self.ds.variables:
-                        # Get values
                         vals = self.ds.variables[d][:]
                         try:
-                            # Convert to list of strings
-                            if vals.dtype.kind in 'SU': # String
-                                layer_values = [str(v) for v in vals]
-                            else:
-                                layer_values = [str(v) for v in vals]
+                            layer_values = [str(v) for v in vals]
                         except:
-                            # Fallback if conversion fails
                             pass
-                            
                     if not layer_values:
-                         # Fallback to indices if variable data missing but dimension exists
                          size = self.ds.dimensions[d].size
                          layer_values = [str(i+1) for i in range(size)]
-                         
                     layer_size = len(layer_values)
-                    break
+                
+                if d in possible_times:
+                    time_dim = d
+                    if d in self.ds.variables:
+                        t_var = self.ds.variables[d]
+                        vals = t_var[:]
+                        try:
+                            import netCDF4
+                            import numpy as np
+                            if hasattr(t_var, 'units'):
+                                cal = getattr(t_var, 'calendar', 'standard')
+                                dates = netCDF4.num2date(vals, units=t_var.units, calendar=cal)
+                                
+                                def fmt(dt):
+                                    if hasattr(dt, 'strftime'):
+                                        return dt.strftime('%Y-%m-%d %H:%M:%S') if dt.hour or dt.minute else dt.strftime('%Y-%m-%d')
+                                    return str(dt)
+                                
+                                if isinstance(dates, (list, np.ndarray)):
+                                    time_values = [fmt(dt) for dt in dates]
+                                else:
+                                    # Might be a single cftime object
+                                    time_values = [fmt(dates)]
+                            else:
+                                time_values = [str(v) for v in vals]
+                        except:
+                            time_values = [str(v) for v in vals]
+                    if not time_values:
+                         size = self.ds.dimensions[d].size
+                         time_values = [str(i+1) for i in range(size)]
+                    time_size = len(time_values)
 
             data_vars.append({
                 'name': name,
@@ -198,7 +286,10 @@ class NetcdfHandler:
                 'dimensions': var.dimensions,
                 'layer_dim': layer_dim,
                 'layer_size': layer_size,
-                'layer_values': layer_values
+                'layer_values': layer_values,
+                'time_dim': time_dim,
+                'time_size': time_size,
+                'time_values': time_values
             })
         return data_vars
 
@@ -345,51 +436,41 @@ class NetcdfHandler:
     def _get_centroids(self):
         """Helper to get or calculate centroids for any grid type."""
         import numpy as np
-        # Fallback to file-provided coordinates for structured grids or if vertices missing
-        if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
-            return self.ds.variables['xc'][:], self.ds.variables['yc'][:]
         
-        # Calculate from vertices if possible (generic geometric approach)
-        # We prefer calculating it to ensure it's the area-weighted centroid, 
-        # as file-provided xc/yc might be simple vertex averages.
-        if 'icvert' in self.ds.variables and 'xv' in self.ds.variables and 'yv' in self.ds.variables:
-            icv = self.ds.variables['icvert'][:]
-            xv = self.ds.variables['xv'][:]
-            yv = self.ds.variables['yv'][:]
+        if 'centroids' in self._cache:
+            return self._cache['centroids']
+
+        # 1. Fallback to file-provided coordinates
+        if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
+            res = (self.ds.variables['xc'][:], self.ds.variables['yc'][:])
+            self._cache['centroids'] = res
+            return res
+        
+        # 2. Calculate from vertices
+        icv = self._get_topology_var('icvert')
+        xv = self._get_topology_var('xv')
+        yv = self._get_topology_var('yv')
+        
+        if icv is not None and xv is not None and yv is not None:
             nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
-            
             n_cells = icv.shape[0]
             xc = np.full(n_cells, np.nan)
             yc = np.full(n_cells, np.nan)
             
-            if shapely:
-                # Use shapely Polygons for true centroid (area-weighted)
-                for i in range(n_cells):
-                    curr_v = icv[i]
-                    v_idx = curr_v[curr_v != nodata]
-                    if len(v_idx) >= 3:
-                        try:
-                            # Shapely Polygon handles closure, but we'll be tidy
-                            if len(v_idx) > 1 and v_idx[0] == v_idx[-1]:
-                                p = Polygon(zip(xv[v_idx[:-1]], yv[v_idx[:-1]]))
-                            else:
-                                p = Polygon(zip(xv[v_idx], yv[v_idx]))
-                            cent = p.centroid
-                            xc[i], yc[i] = cent.x, cent.y
-                        except:
-                            pass
-            else:
-                # Arithmetic mean fallback - improved to handle duplicated vertices
-                for i in range(n_cells):
-                    curr_v = icv[i]
-                    v_idx = curr_v[curr_v != nodata]
-                    if len(v_idx) > 0:
-                        # Exclude last point if it duplicates the first
-                        if len(v_idx) > 1 and v_idx[0] == v_idx[-1]:
-                            v_idx = v_idx[:-1]
+            # Use fast arithmetic mean for centroids
+            for i in range(n_cells):
+                curr_v = icv[i]
+                v_idx = curr_v[curr_v != nodata]
+                if len(v_idx) >= 3:
+                    try:
                         xc[i] = np.mean(xv[v_idx])
                         yc[i] = np.mean(yv[v_idx])
-            return xc, yc
+                    except:
+                        pass
+            
+            res = (xc, yc)
+            self._cache['centroids'] = res
+            return res
             
         return None, None
 
@@ -418,7 +499,7 @@ class NetcdfHandler:
                 ranges.append((min(d1, d2), max(d1, d2)))
         return ranges
 
-    def get_cross_section_data(self, variable_name, points):
+    def get_cross_section_data(self, variable_name, points, time_idx=0):
         """
         Extracts cross-section data using exact Shapely intersections with cell geometries.
         """
@@ -464,27 +545,61 @@ class NetcdfHandler:
                             cell_segments.append({'d1': d1, 'd2': d2, 'idx': (r, c), 'cx': xc, 'cy': yc})
         else:
             # Vertex Grid
-            icv = self.ds.variables['icvert'][:]
-            xv = self.ds.variables['xv'][:]
-            yv = self.ds.variables['yv'][:]
-            nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+            icv = self._get_topology_var('icvert')
+            xv = self._get_topology_var('xv')
+            yv = self._get_topology_var('yv')
             xc_all, yc_all = self._get_centroids()
-            if xc_all is None: return None
             
-            # Candidate filter (centroids within bbox + buffer)
-            c_mask = (xc_all >= bbox[0] - 1000) & (xc_all <= bbox[2] + 1000) & \
-                     (yc_all >= bbox[1] - 1000) & (yc_all <= bbox[3] + 1000)
-            cand_indices = np.where(c_mask)[0]
+            if icv is None or xv is None or yv is None or xc_all is None: 
+                return None
             
-            for i in cand_indices:
-                v_idx = icv[i][icv[i] != nodata]
-                if len(v_idx) < 3: continue
-                p = Polygon(zip(xv[v_idx], yv[v_idx]))
-                if line.intersects(p):
+            # Use Spatial Index (STRtree) for massive speedup on large grids
+            if 'strtree' not in self._cache and shapely:
+                nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+                polys = []
+                poly_indices = []
+                for i in range(len(icv)):
+                    v_idx = icv[i][icv[i] != nodata]
+                    if len(v_idx) >= 3:
+                        polys.append(Polygon(zip(xv[v_idx], yv[v_idx])))
+                        poly_indices.append(i)
+                self._cache['polys'] = polys
+                self._cache['poly_indices'] = poly_indices
+                self._cache['strtree'] = STRtree(polys)
+            
+            if 'strtree' in self._cache:
+                tree = self._cache['strtree']
+                all_polys = self._cache['polys']
+                all_indices = self._cache['poly_indices']
+                
+                # Query tree for cells intersecting the line
+                intersecting_indices = tree.query(line, predicate='intersects')
+                for idx_in_tree in intersecting_indices:
+                    p = all_polys[idx_in_tree]
+                    global_idx = all_indices[idx_in_tree]
                     inter = intersection(line, p)
                     for d1, d2 in self._get_line_segment_ranges(line, inter):
-                        cell_segments.append({'d1': d1, 'd2': d2, 'idx': int(i), 'cx': xc_all[i], 'cy': yc_all[i]})
-
+                        cell_segments.append({
+                            'd1': d1, 'd2': d2, 
+                            'idx': int(global_idx), 
+                            'cx': xc_all[global_idx], 
+                            'cy': yc_all[global_idx]
+                        })
+            else:
+                # Fallback to bbox filtering if STRtree failed
+                c_mask = (xc_all >= bbox[0] - 1000) & (xc_all <= bbox[2] + 1000) & \
+                         (yc_all >= bbox[1] - 1000) & (yc_all <= bbox[3] + 1000)
+                cand_indices = np.where(c_mask)[0]
+                nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+                
+                for i in cand_indices:
+                    v_idx = icv[i][icv[i] != nodata]
+                    if len(v_idx) < 3: continue
+                    p = Polygon(zip(xv[v_idx], yv[v_idx]))
+                    if line.intersects(p):
+                        inter = intersection(line, p)
+                        for d1, d2 in self._get_line_segment_ranges(line, inter):
+                            cell_segments.append({'d1': d1, 'd2': d2, 'idx': int(i), 'cx': xc_all[i], 'cy': yc_all[i]})
         if not cell_segments:
             return {"error": "No cells found along the cross-section line."}
 
@@ -528,12 +643,44 @@ class NetcdfHandler:
                 def get_v(v):
                     if v not in self.ds.variables: return None
                     d = self.ds.variables[v]
-                    if d.ndim == 2: c = d[sy, sx]
-                    elif d.ndim == 3: c = d[:, sy, sx]
-                    elif d.ndim == 4: c = d[-1, :, sy, sx]
-                    else: return None
+                    
+                def get_v(v):
+                    if v not in self.ds.variables: return None
+                    d = self.ds.variables[v]
+                    dims = d.dimensions
+                    sl = [slice(None)] * d.ndim
+                    
+                    # Apply Time selection
+                    possible_times = {'time', 't', 'date'}
+                    for i, dim_name in enumerate(dims):
+                        if dim_name in possible_times:
+                            sl[i] = time_idx
+                            break
+                    
+                    # Structured: extract the spatial sub-region (sy, sx)
+                    # and all layers.
+                    if 'x' in dims and 'y' in dims:
+                        # Find indices for x and y
+                        ix = dims.index('x')
+                        iy = dims.index('y')
+                        sl[ix] = sx
+                        sl[iy] = sy
+                        c = d[tuple(sl)]
+                    else:
+                        # Fallback for structured variables that might use different dim names
+                        # or simple ndim checks
+                        if d.ndim == 2: c = d[sy, sx]
+                        elif d.ndim == 3: c = d[tuple(sl)][sy, sx]
+                        elif d.ndim == 4: c = d[tuple(sl)][:, sy, sx]
+                        else: return None
+                    
                     arr = c.filled(np.nan) if hasattr(c, 'filled') else c
-                    return arr[:, yl, xl] if d.ndim > 2 else arr[yl, xl]
+                    # arr is now (layer, y_sub, x_sub)
+                    # index with yl, xl (arrays) to get values along the line
+                    if arr.ndim == 3:
+                        return arr[:, yl, xl]
+                    else:
+                        return arr[yl, xl]
                     
                 top = get_v('top')
                 botm = get_v('botm')
@@ -545,10 +692,28 @@ class NetcdfHandler:
                 def get_v(v):
                     if v not in self.ds.variables: return None
                     d = self.ds.variables[v]
-                    if d.ndim == 1: c = d[idx]
-                    elif d.ndim == 2: c = d[:, idx]
-                    elif d.ndim == 3: c = d[-1, :, idx]
-                    else: return None
+                    dims = d.dimensions
+                    sl = [slice(None)] * d.ndim
+                    
+                    # Apply Time selection
+                    possible_times = {'time', 't', 'date'}
+                    for i, dim_name in enumerate(dims):
+                        if dim_name in possible_times:
+                            sl[i] = time_idx
+                            break
+                    
+                    # Apply icell2d selections
+                    if 'icell2d' in dims:
+                        idx_dim = dims.index('icell2d')
+                        sl[idx_dim] = idx
+                        c = d[tuple(sl)]
+                    else:
+                        # Fallback simple logic
+                        if d.ndim == 1: c = d[idx]
+                        elif d.ndim == 2: c = d[tuple(sl)][idx]
+                        elif d.ndim == 3: c = d[tuple(sl)][:, idx]
+                        else: return None
+                        
                     return c.filled(np.nan) if hasattr(c, 'filled') else c
                 
                 top, botm = get_v('top'), get_v('botm')
@@ -574,9 +739,9 @@ class NetcdfHandler:
             import traceback
             return {"error": f"Data extraction failed: {str(e)}\n{traceback.format_exc()}"}
 
-    def export_to_mesh(self, var_name, layer_idx=0, output_path=None):
+    def export_to_mesh(self, var_name, layer_idx=0, time_idx=0, output_path=None):
         """
-        Exports a single variable (at a specific layer) to a clean UGRID NetCDF file.
+        Exports a single variable (at a specific layer and time) to a clean UGRID NetCDF file.
         This provides maximal compatibility with MDAL.
         """
         if not self.ds or var_name not in self.ds.variables:
@@ -588,35 +753,30 @@ class NetcdfHandler:
             
             # 1. Prepare data slice
             var = self.ds.variables[var_name]
-            data = None
             
-            # Determine dimensions and slice
-            # Expected dims for vertex grid: (time, layer, icell2d) or (layer, icell2d) or (icell2d)
-            if 'icell2d' not in var.dimensions:
+            # Identify dimensions
+            dims = var.dimensions
+            if 'icell2d' not in dims:
                 return False, f"Variable {var_name} does not have icell2d dimension."
                 
-            ic_idx = var.dimensions.index('icell2d')
+            # Generic slicing approach
+            sl = [slice(None)] * var.ndim
             
-            if var.ndim == 1:
-                data = var[:]
-            elif var.ndim == 2:
-                # Assume (layer, icell2d) or (time, icell2d)
-                # Slice by layer_idx
-                if ic_idx == 1:
-                    data = var[layer_idx, :]
-                else:
-                    data = var[:, layer_idx]
-            elif var.ndim == 3:
-                # Assume (time, layer, icell2d) - slice to last time, selected layer
-                if var.dimensions == ('time', 'layer', 'icell2d'):
-                    data = var[-1, layer_idx, :]
-                else:
-                    # Fallback slice
-                    data = var.chunk() # Not sure of generic slice, use simple approach
-                    sl = [slice(None)] * var.ndim
-                    sl[1] = layer_idx # layer usually 2nd
-                    sl[0] = -1 # time usually 1st
-                    data = var[tuple(sl)]
+            # Handle Layer Dim
+            possible_layers = {'layer', 'lev', 'level', 'z'}
+            for i, d in enumerate(dims):
+                if d in possible_layers:
+                    sl[i] = layer_idx
+                    break
+            
+            # Handle Time Dim
+            possible_times = {'time', 't', 'date'}
+            for i, d in enumerate(dims):
+                if d in possible_times:
+                    sl[i] = time_idx
+                    break
+            
+            data = var[tuple(sl)]
             
             if data is None:
                 return False, "Unsupported variable dimensions"

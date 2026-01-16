@@ -12,6 +12,49 @@ import json
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QPointF
 from qgis.core import QgsPointXY, QgsGeometry, QgsWkbTypes
 
+class VertexEditorDialog(QtWidgets.QDialog):
+    def __init__(self, points, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Vertices")
+        self.resize(400, 500)
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        layout.addWidget(QtWidgets.QLabel("Manual Coordinate Entry:"))
+        
+        self.table = QtWidgets.QTableWidget(len(points), 2)
+        self.table.setHorizontalHeaderLabels(["X (Easting)", "Y (Northing)"])
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        
+        for i, p in enumerate(points):
+            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{p.x():.3f}"))
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{p.y():.3f}"))
+        
+        layout.addWidget(self.table)
+        
+        # Add note about projection
+        note = QtWidgets.QLabel("Note: Coordinates should be in the model CRS (e.g. EPSG:28992).")
+        note.setStyleSheet("font-style: italic; color: #666;")
+        layout.addWidget(note)
+        
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal, self)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+        
+    def get_points(self):
+        pts = []
+        for i in range(self.table.rowCount()):
+            try:
+                x_text = self.table.item(i, 0).text()
+                y_text = self.table.item(i, 1).text()
+                if x_text and y_text:
+                    pts.append(QgsPointXY(float(x_text), float(y_text)))
+            except ValueError:
+                continue
+        return pts
+
 class NlmodDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None, iface=None):
         super(NlmodDockWidget, self).__init__(parent)
@@ -24,7 +67,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.setWidget(self.main_widget)
         layout = QtWidgets.QVBoxLayout(self.main_widget)
         
-        # File Selection
+        # File Selection / Select Data Group
         file_group = QtWidgets.QGroupBox("Select Data")
         file_layout = QtWidgets.QVBoxLayout()
         h_layout = QtWidgets.QHBoxLayout()
@@ -34,38 +77,54 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         h_layout.addWidget(self.file_edit)
         h_layout.addWidget(self.browse_btn)
         file_layout.addLayout(h_layout)
+        
+        # Metadata / Info Area
+        self.info_text = QtWidgets.QTextBrowser()
+        self.info_text.setMaximumHeight(100)
+        file_layout.addWidget(QtWidgets.QLabel("Metadata:"))
+        file_layout.addWidget(self.info_text)
+        
+        # Ensure the group stays compact if given more space
+        file_layout.addStretch()
+        
         file_group.setLayout(file_layout)
-        layout.addWidget(file_group)
+        layout.addWidget(file_group, 0)
         
 
-        # Info Area
-        self.info_text = QtWidgets.QTextBrowser()
-        self.info_text.setMaximumHeight(120)
-        layout.addWidget(QtWidgets.QLabel("Metadata:"))
-        layout.addWidget(self.info_text)
+        # Map Layer Group
+        layer_group = QtWidgets.QGroupBox("Map Layer")
+        layer_group_layout = QtWidgets.QVBoxLayout()
+        layer_group.setLayout(layer_group_layout)
         
         # Variable List
         self.var_list = QtWidgets.QListWidget()
         self.var_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.var_list.itemSelectionChanged.connect(self.update_layer_selection)
-        layout.addWidget(QtWidgets.QLabel("Variables (Input/Output):"))
-        layout.addWidget(self.var_list)
+        layer_group_layout.addWidget(QtWidgets.QLabel("Variables:"))
+        layer_group_layout.addWidget(self.var_list)
 
         # Layer Selection
-        layer_layout = QtWidgets.QHBoxLayout()
-        layer_layout.addWidget(QtWidgets.QLabel("Select Layer:"))
+        layer_sel_layout = QtWidgets.QHBoxLayout()
+        layer_sel_layout.addWidget(QtWidgets.QLabel("Select Layer:"))
         self.layer_combo = QtWidgets.QComboBox()
         self.layer_combo.setEnabled(False)
-        layer_layout.addWidget(self.layer_combo)
-        layout.addLayout(layer_layout)
+        layer_sel_layout.addWidget(self.layer_combo)
+        layer_group_layout.addLayout(layer_sel_layout)
+
+        # Time Selection
+        time_sel_layout = QtWidgets.QHBoxLayout()
+        time_sel_layout.addWidget(QtWidgets.QLabel("Select Time:"))
+        self.time_combo = QtWidgets.QComboBox()
+        self.time_combo.setEnabled(False)
+        time_sel_layout.addWidget(self.time_combo)
+        layer_group_layout.addLayout(time_sel_layout)
         
-        # Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
+        # Add to Map Button
         self.load_btn = QtWidgets.QPushButton("Add to Map")
         self.load_btn.clicked.connect(self.add_layer)
-        btn_layout.addWidget(self.load_btn)
+        layer_group_layout.addWidget(self.load_btn)
         
-        layout.addLayout(btn_layout)
+        layout.addWidget(layer_group, 1)
         
         # Cross Section Group (at bottom)
         cs_group = QtWidgets.QGroupBox("Cross Section")
@@ -87,12 +146,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Cross Section List Manager
         self.cs_list = QtWidgets.QListWidget()
         self.cs_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.cs_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.cs_list.customContextMenuRequested.connect(self.on_cs_list_context_menu)
         self.cs_list.itemSelectionChanged.connect(self.on_cs_selection_changed)
         self.cs_list.itemSelectionChanged.connect(self.update_ui_state) # Track button enablement
         self.cs_list.itemDoubleClicked.connect(self.raise_cross_section_window)
         cs_layout.addWidget(self.cs_list)
         
-        layout.addWidget(cs_group)
+        layout.addWidget(cs_group, 0)
         
         # Stretch to fill bottom
         layout.addStretch()
@@ -131,6 +192,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
              return
         
         self.info_text.setText(self.handler.get_info_text())
+        
+        # Populate Layers and Times globally
+        dim_meta = self.handler.get_dimensions_metadata()
+        
+        self.layer_combo.blockSignals(True)
+        self.layer_combo.clear()
+        if dim_meta["layers"]:
+            self.layer_combo.addItems(dim_meta["layers"])
+        self.layer_combo.blockSignals(False)
+        
+        self.time_combo.blockSignals(True)
+        self.time_combo.clear()
+        if dim_meta["times"]:
+            self.time_combo.addItems(dim_meta["times"])
+        self.time_combo.blockSignals(False)
             
         self.populate_vars()
         self.save_state_to_project()
@@ -145,46 +221,28 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             item = QtWidgets.QListWidgetItem(text)
             item.setToolTip(v['description'])
             item.setData(QtCore.Qt.UserRole, v['name'])
-            item.setData(QtCore.Qt.UserRole + 1, v['layer_size'])
-            item.setData(QtCore.Qt.UserRole + 2, v['layer_values'])
+            
+            # Dimension Presence Flags
+            item.setData(QtCore.Qt.UserRole + 1, v.get('layer_size', 0) > 0)
+            item.setData(QtCore.Qt.UserRole + 2, v.get('time_size', 0) > 0)
+            
             self.var_list.addItem(item)
     
     def update_layer_selection(self):
-        # Save current selection if any
-        current_layer = self.layer_combo.currentText()
-        
-        self.layer_combo.blockSignals(True)
-        self.layer_combo.clear()
-        self.layer_combo.setEnabled(False)
-        
+        """Enable/Disable combos based on the selected variable's dimensions."""
         selected_items = self.var_list.selectedItems()
+        
         if not selected_items:
-            self.layer_combo.blockSignals(False)
+            self.layer_combo.setEnabled(False)
+            self.time_combo.setEnabled(False)
             return
             
         item = selected_items[0]
-        layer_size = item.data(QtCore.Qt.UserRole + 1)
-        layer_values = item.data(QtCore.Qt.UserRole + 2)
+        has_layers = item.data(QtCore.Qt.UserRole + 1)
+        has_times = item.data(QtCore.Qt.UserRole + 2)
         
-        if layer_size and layer_size > 0:
-            self.layer_combo.setEnabled(True)
-            new_items = []
-            if layer_values:
-                new_items = [str(x) for x in layer_values]
-            else:
-                new_items = [str(i+1) for i in range(layer_size)]
-            
-            self.layer_combo.addItems(new_items)
-            
-            # Try to restore previous selection
-            idx = self.layer_combo.findText(current_layer)
-            if idx >= 0:
-                self.layer_combo.setCurrentIndex(idx)
-            else:
-                # If not found, default to first or keep current (which is first after clear+add)
-                pass
-        
-        self.layer_combo.blockSignals(False)
+        self.layer_combo.setEnabled(has_layers)
+        self.time_combo.setEnabled(has_times)
 
     def add_layer(self):
         if not self.handler:
@@ -214,21 +272,28 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 layer_val = self.layer_combo.currentText()
                 layer_idx = self.layer_combo.currentIndex()
             
+            time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
+            time_val = self.time_combo.currentText() if self.time_combo.isEnabled() else ""
+            
             # Create a descriptive temp filename
             temp_dir = tempfile.gettempdir()
             clean_var = "".join(x for x in var_name if x.isalnum())
-            clean_val = "".join(x for x in layer_val if x.isalnum())
-            temp_path = os.path.join(temp_dir, f"nlmod_{clean_var}_{clean_val}.nc")
+            clean_l_val = "".join(x for x in layer_val if x.isalnum())
+            clean_t_val = "".join(x for x in time_val if x.isalnum())
+            temp_path = os.path.join(temp_dir, f"nlmod_{clean_var}_{clean_l_val}_{clean_t_val}.nc")
             
             QgsMessageLog.logMessage(f"NLMOD: Exporting mesh to {temp_path}", "NlmodInspector", Qgis.Info)
             
-            success, msg = self.handler.export_to_mesh(var_name, layer_idx, temp_path)
+            success, msg = self.handler.export_to_mesh(var_name, layer_idx, time_idx, temp_path)
             
             if not success:
                 QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export mesh: {msg}")
                 return
             
-            layer_name = f"{base_name} - {var_name} ({layer_val})"
+            layer_name = f"{base_name} - {var_name}"
+            if self.layer_combo.isEnabled():
+                layer_name += f" ({layer_val})"
+            if time_val: layer_name += f" [{time_val}]"
             layer = QgsMeshLayer(temp_path, layer_name, "mdal")
             
             if layer.isValid():
@@ -253,14 +318,24 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             # Determine Band Index FIRST (1-based)
             band_idx = 1
-            # Apply layer selection if applicable
-            if self.layer_combo.isEnabled():
-                # Map selection index to band index (assuming order matches)
-                idx = self.layer_combo.currentIndex()
-                if idx >= 0:
-                    band_idx = idx + 1
-                    val_str = self.layer_combo.currentText()
-                    layer_name = f"{var_name} ({val_str}) @ {base_name}"
+            
+            layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
+            time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
+            
+            # Use global count if the variable has layers, else 1
+            n_layers = self.layer_combo.count() if self.layer_combo.isEnabled() else 1
+            if n_layers == 0: n_layers = 1
+            
+            # GDAL flattens NetCDF dimensions: band_idx = time_idx * n_layers + layer_idx + 1
+            band_idx = (time_idx * n_layers) + layer_idx + 1
+            
+            val_str = self.layer_combo.currentText() if self.layer_combo.isEnabled() else ""
+            time_str = self.time_combo.currentText() if self.time_combo.isEnabled() else ""
+            
+            layer_name = var_name
+            if val_str: layer_name += f" ({val_str})"
+            if time_str: layer_name += f" [{time_str}]"
+            layer_name += f" @ {base_name}"
             
             # --- VRT Workaround for Coordinates ---
             # QGIS/GDAL often defaults to 0..N if grid mapping isn't standard.
@@ -553,19 +628,35 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         return self.xs_tool
 
     def activate_cross_section_tool(self):
-        # Check if a variable is selected and has layer dimension
+        # 1. Automatic variable selection if none is picked
         selected_items = self.var_list.selectedItems()
+        if not selected_items and self.handler and self.handler.ds:
+            possible_layer_dims = {'layer', 'z'}
+            found_idx = -1
+            for i in range(self.var_list.count()):
+                v_name = self.var_list.item(i).data(QtCore.Qt.UserRole)
+                if v_name in self.handler.ds.variables:
+                    v_dims = self.handler.ds.variables[v_name].dimensions
+                    if any(d in possible_layer_dims for d in v_dims):
+                        found_idx = i
+                        break
+            
+            if found_idx != -1:
+                self.var_list.setCurrentRow(found_idx)
+                selected_items = self.var_list.selectedItems()
+
+        # Check if a variable is selected and has layer dimension
         if not selected_items:
-            QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
+            QtWidgets.QMessageBox.information(self, "Info", "Please select a 3D variable first.")
             return
             
         var_name = selected_items[0].data(QtCore.Qt.UserRole)
         
-        # Check if variable is 3D (has layer dimension)
+        # Final validation check
         if self.handler and self.handler.ds:
             var = self.handler.ds.variables[var_name]
             has_layer_dim = False
-            possible_layer_dims = {'layer', 'lev', 'level', 'z'}
+            possible_layer_dims = {'layer', 'z'}
             
             for dim in var.dimensions:
                 if dim in possible_layer_dims:
@@ -577,7 +668,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     self, 
                     "Invalid Variable", 
                     f"Variable '{var_name}' does not have a layer dimension.\n\n"
-                    "Cross-sections require 3D variables with layers (e.g., 'layer', 'lev', 'level')."
+                    "Cross-sections require 3D variables with layers (e.g., 'layer', 'z')."
                 )
                 return
         
@@ -604,6 +695,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not self.handler:
             return None
             
+        time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
+            
         # Transform points to Model CRS
         try:
             from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform
@@ -617,11 +710,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except:
             pass
             
-        return self.handler.get_cross_section_data(var_name, points)
+        return self.handler.get_cross_section_data(var_name, points, time_idx=time_idx)
 
     def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
                                z_range=None, v_range=None, visible=True,
-                               show_layers=True, show_cells=False):
+                               show_layers=True, show_cells=False, use_log=False,
+                               cmap_name='Turbo', invert_cmap=False):
         """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
             return
@@ -677,19 +771,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             from .cross_section_plot import CrossSectionPlotWindow
             
-            # Create Window
+            # 4. Show Window
             win = CrossSectionPlotWindow(
-                data, var_name, 
-                vertex_distances=v_dists, 
-                item_id=item_id,
-                all_vars=vars_3d,
-                data_fetcher=self.fetch_cross_section_data,
-                label=cs_label,
-                points=points,
-                z_range=z_range,
-                v_range=v_range,
-                show_layers=show_layers,
-                show_cells=show_cells
+                data, var_name, self, vertex_distances=v_dists,
+                item_id=item_id, all_vars=vars_3d, data_fetcher=self.fetch_cross_section_data,
+                label=cs_label, points=points, z_range=z_range, v_range=v_range,
+                show_layers=show_layers, show_cells=show_cells, use_log=use_log,
+                cmap_name=cmap_name, invert_cmap=invert_cmap
             )
             win.variable_changed.connect(self.update_cs_list_label)
             win.cursor_moved.connect(self.on_cs_cursor_moved)
@@ -874,6 +962,51 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win.raise_()
             win.activateWindow()
             self.highlight_cross_section(item)
+
+    def on_cs_list_context_menu(self, pos):
+        item = self.cs_list.itemAt(pos)
+        if not item: return
+        
+        item_id = item.data(QtCore.Qt.UserRole)
+        
+        menu = QtWidgets.QMenu(self)
+        
+        rename_action = menu.addAction("Rename")
+        edit_pts_action = menu.addAction("Edit vertices...")
+        
+        action = menu.exec_(self.cs_list.mapToGlobal(pos))
+        
+        if action == rename_action:
+            self.rename_cross_section(item)
+        elif action == edit_pts_action:
+            self.edit_cross_section_vertices(item_id)
+
+    def rename_cross_section(self, item):
+        item_id = item.data(QtCore.Qt.UserRole)
+        win = self.plot_windows.get(item_id)
+        if not win: return
+        
+        new_label, ok = QtWidgets.QInputDialog.getText(
+            self, "Rename Cross-Section", "New Label:", 
+            QtWidgets.QLineEdit.Normal, win.cs_label)
+            
+        if ok and new_label:
+            win.cs_label = new_label
+            win.setWindowTitle(f"Cross Section {new_label}: {win.current_var}")
+            self.update_cs_list_label(item_id, win.current_var)
+            self.save_state_to_project()
+
+    def edit_cross_section_vertices(self, item_id):
+        points = self.cs_geometries.get(item_id)
+        if not points: return
+        
+        dlg = VertexEditorDialog(points, self)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            new_points = dlg.get_points()
+            if len(new_points) >= 2:
+                # Set active and trigger update
+                self.active_cs_id = item_id
+                self.on_cross_section_changed(new_points)
 
     def update_cs_list_label(self, item_id, new_var_name):
         """Update the list widget text when a plot's variable changes."""
@@ -1081,20 +1214,31 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         is_open = "true" if self.isVisible() else "false"
         QgsProject.instance().writeEntry("NlmodInspector", "is_open", is_open)
         
+        # Save current selections
+        if self.time_combo.isEnabled():
+            QgsProject.instance().writeEntry("NlmodInspector", "global_time_idx", str(self.time_combo.currentIndex()))
+        
         cs_list = []
         for item_id, points in self.cs_geometries.items():
             win = self.plot_windows.get(item_id)
             if win:
+                # Ensure we use standard Python types for JSON serialization (NumPy types fail)
+                v_min = float(win.v_min) if win.v_min is not None else None
+                v_max = float(win.v_max) if win.v_max is not None else None
+                
                 cs_list.append({
                     'id': item_id,
                     'label': win.cs_label,
                     'variable': win.current_var,
-                    'points': [(p.x(), p.y()) for p in points],
-                    'z_range': (win.z_min_spin.value(), win.z_max_spin.value()),
-                    'v_range': (win.v_min_spin.value(), win.v_max_spin.value()),
+                    'points': [(float(p.x()), float(p.y())) for p in points],
+                    'z_range': (float(win.z_min_spin.value()), float(win.z_max_spin.value())),
+                    'v_range': (v_min, v_max),
                     'visible': win.isVisible(),
                     'show_layers': win.show_layer_boundaries,
-                    'show_cells': win.show_cell_boundaries
+                    'show_cells': win.show_cell_boundaries,
+                    'use_log': win.use_log,
+                    'cmap': win.cmap_name,
+                    'invert_cmap': win.invert_cmap
                 })
         
         QgsProject.instance().writeEntry("NlmodInspector", "cross_sections", json.dumps(cs_list))
@@ -1114,6 +1258,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.file_edit.setText(filepath)
                 self.open_netcdf(filepath)
                 
+                # Restore time selection
+                time_str, ok = QgsProject.instance().readEntry("NlmodInspector", "global_time_idx", "0")
+                if ok and self.time_combo.isEnabled():
+                    try:
+                        time_idx = int(time_str)
+                        if time_idx < self.time_combo.count():
+                            self.time_combo.setCurrentIndex(time_idx)
+                    except:
+                        pass
+                
                 cs_json, _ = QgsProject.instance().readEntry("NlmodInspector", "cross_sections", "[]")
                 QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NlmodInspector", Qgis.Info)
                 
@@ -1130,7 +1284,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             v_range=cs.get('v_range'),
                             visible=cs.get('visible', True),
                             show_layers=cs.get('show_layers', True),
-                            show_cells=cs.get('show_cells', False)
+                            show_cells=cs.get('show_cells', False),
+                            use_log=cs.get('use_log', False),
+                            cmap_name=cs.get('cmap', 'Turbo'),
+                            invert_cmap=cs.get('invert_cmap', False)
                         )
                 except Exception as e:
                     QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)
