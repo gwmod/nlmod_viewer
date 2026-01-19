@@ -33,6 +33,10 @@ class NetcdfHandler:
         self.ds = None
         self.grid_type = "unknown"
         self._cache = {} # Cache for topology and spatial index
+        self.angrot = 0.0
+        self.xorigin = 0.0
+        self.yorigin = 0.0
+        self.is_absolute = False
 
     def open(self):
         if not os.path.exists(self.filepath):
@@ -43,14 +47,29 @@ class NetcdfHandler:
                 
             self.ds = netCDF4.Dataset(self.filepath, 'r')
             
-            # Check for grid rotation (angrot)
-            angrot = getattr(self.ds, 'angrot', 0)
-            if angrot != 0:
-                self.ds.close()
-                self.ds = None
-                return False, f"Grid rotation detected (angrot={angrot}).\n\nModel datasets with grid rotation are not yet supported."
+            # Read rotation and origin attributes if present
+            self.angrot = float(getattr(self.ds, 'angrot', 0.0))
+            self.xorigin = float(getattr(self.ds, 'xorigin', 0.0))
+            self.yorigin = float(getattr(self.ds, 'yorigin', 0.0))
 
             self.detect_grid_type()
+            
+            # Detect if coordinates are already absolute
+            self.is_absolute = False
+            if self.xorigin != 0 or self.yorigin != 0:
+                import numpy as np
+                xc_test = None
+                if 'x' in self.ds.variables and self.ds.variables['x'].ndim == 1:
+                    xc_test = self.ds.variables['x'][:]
+                elif 'xc' in self.ds.variables:
+                    xc_test = self.ds.variables['xc'][:]
+                
+                if xc_test is not None:
+                    mean_x = np.nanmean(xc_test)
+                    # If mean coordinate is closer to xorigin than to 0, it's absolute
+                    if np.abs(mean_x) > np.abs(self.xorigin) * 0.5:
+                        self.is_absolute = True
+            
             return True, ""
         except ImportError:
             return False, "The 'netCDF4' library is missing.\n\nPlease install it using the OSGeo4W Shell:\n  pip install netCDF4"
@@ -62,6 +81,10 @@ class NetcdfHandler:
             self.ds.close()
             self.ds = None
         self._cache = {} # Clear cache
+        self.angrot = 0.0
+        self.xorigin = 0.0
+        self.yorigin = 0.0
+        self.is_absolute = False
 
     def detect_grid_type(self):
         # Heuristics for nlmod / UGRID / MODFLOW 6
@@ -112,6 +135,93 @@ class NetcdfHandler:
              return
             
         self.grid_type = "unknown"
+
+    def transform_model_to_world(self, xm, ym):
+        """Transforms model coordinates (xm, ym) to world coordinates (xw, yw)."""
+        import numpy as np
+        if self.is_absolute:
+            return xm, ym
+            
+        if self.angrot == 0:
+            return xm + self.xorigin, ym + self.yorigin
+            
+        angle_rad = np.radians(self.angrot)
+        cos_ang = np.cos(angle_rad)
+        sin_ang = np.sin(angle_rad)
+        
+        xw = self.xorigin + xm * cos_ang - ym * sin_ang
+        yw = self.yorigin + xm * sin_ang + ym * cos_ang
+        return xw, yw
+
+    def transform_world_to_model(self, xw, yw):
+        """Transforms world coordinates (xw, yw) to model coordinates (xm, ym)."""
+        import numpy as np
+        if self.is_absolute:
+            return xw, yw
+            
+        dx = xw - self.xorigin
+        dy = yw - self.yorigin
+        
+        if self.angrot == 0:
+            return dx, dy
+            
+        angle_rad = np.radians(self.angrot)
+        cos_ang = np.cos(angle_rad)
+        sin_ang = np.sin(angle_rad)
+        
+        xm = dx * cos_ang + dy * sin_ang
+        ym = -dx * sin_ang + dy * cos_ang
+        return xm, ym
+
+    def get_geotransform(self, var_name=None):
+        """Calculates the GDAL 6-parameter geotransform [ulx, dx, rotation, uly, rotation, -dy]."""
+        import numpy as np
+        if not self.ds or self.grid_type != 'structured':
+            return None
+            
+        # 1. Get model space extent and cell size
+        # We search for coords same as in get_extent but simpler
+        x_var, y_var = None, None
+        vkeys = self.ds.variables.keys()
+        for pair in [('x', 'y'), ('lon', 'lat'), ('longitude', 'latitude')]:
+            if pair[0] in vkeys and pair[1] in vkeys:
+                x_var, y_var = self.ds.variables[pair[0]], self.ds.variables[pair[1]]
+                break
+        
+        if x_var is None: return None
+        
+        x_vals, y_vals = x_var[:], y_var[:]
+        dx = np.abs(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else 1.0
+        dy = np.abs(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else 1.0
+        
+        # Model space limits (bottom-left origin)
+        xm_min = np.min(x_vals) - dx/2
+        ym_max = np.max(y_vals) + dy/2
+        
+        # 2. Transform model top-left (xm_min, ym_max) to world space top-left
+        # Detect if coordinates are already absolute
+        is_absolute = False
+        if self.xorigin != 0 or self.yorigin != 0:
+            if np.abs(xm_min + dx/2) > np.abs(self.xorigin) * 0.5:
+                is_absolute = True
+
+        if not is_absolute:
+            # Rotation angle in radians
+            a = np.radians(self.angrot)
+            cosa = np.cos(a)
+            sina = np.sin(a)
+            
+            # World Top-Left (ulx, uly)
+            ulx = self.xorigin + xm_min * cosa - ym_max * sina
+            uly = self.yorigin + xm_min * sina + ym_max * cosa
+            
+            # Geotransform parameters (pixel to world)
+            return [ulx, dx * cosa, dy * sina, uly, dx * sina, -dy * cosa]
+        else:
+            # Already absolute: just need standard 0-rotation geotransform?
+            # Actually, even if absolute, it COULD be rotated, but flopy usually doesn't do that.
+            # If it's absolute, xm_min/ym_max ARE the world coordinates.
+            return [xm_min, dx, 0, ym_max, 0, -dy]
 
     def get_crs(self):
         """Attempts to find CRS definition in the NetCDF file."""
@@ -396,13 +506,35 @@ class NetcdfHandler:
             dx = np.abs(x[1] - x[0])
             dy = np.abs(y[1] - y[0])
             
-            # Min is center - dx/2
-            xmin = np.min(x) - dx/2
-            xmax = np.max(x) + dx/2
-            ymin = np.min(y) - dy/2
-            ymax = np.max(y) + dy/2
+            # Model space bounds
+            xm_min = np.min(x) - dx/2
+            xm_max = np.max(x) + dx/2
+            ym_min = np.min(y) - dy/2
+            ym_max = np.max(y) + dy/2
             
-            return (xmin, xmax, ymin, ymax, y_is_ascending)
+            # Now transform corners if rotated or moved from QGIS 0,0
+            # Detect if already absolute
+            is_absolute = False
+            if self.xorigin != 0 or self.yorigin != 0:
+                if np.nanmean(np.abs(x)) > np.abs(self.xorigin) * 0.5:
+                    is_absolute = True
+
+            if (self.angrot == 0 and self.xorigin == 0 and self.yorigin == 0) or is_absolute:
+                return (xm_min, xm_max, ym_min, ym_max, y_is_ascending)
+            
+            # Calculate 4 corners in model space and transform
+            corners = [
+                (xm_min, ym_min), (xm_max, ym_min),
+                (xm_max, ym_max), (xm_min, ym_max)
+            ]
+            
+            xw_list, yw_list = [], []
+            for cx, cy in corners:
+                xw, yw = self.transform_model_to_world(cx, cy)
+                xw_list.append(xw)
+                yw_list.append(yw)
+            
+            return (min(xw_list), max(xw_list), min(yw_list), max(yw_list), y_is_ascending)
         except Exception as e:
             from qgis.core import QgsMessageLog, Qgis
             QgsMessageLog.logMessage(f"NLMOD: Error calculating extent: {e}", "NlmodInspector", Qgis.Critical)
@@ -442,7 +574,23 @@ class NetcdfHandler:
 
         # 1. Fallback to file-provided coordinates
         if 'xc' in self.ds.variables and 'yc' in self.ds.variables:
-            res = (self.ds.variables['xc'][:], self.ds.variables['yc'][:])
+            xc_vals = self.ds.variables['xc'][:]
+            yc_vals = self.ds.variables['yc'][:]
+            
+            # Apply transformation if necessary (and if not already absolute)
+            # Heuristic: if mean xc is much larger than its range, and near xorigin, it's likely absolute.
+            is_absolute = False
+            if self.xorigin != 0 or self.yorigin != 0:
+                mean_x = np.nanmean(xc_vals)
+                if np.abs(mean_x) > np.abs(self.xorigin) * 0.5:
+                    is_absolute = True
+
+            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_absolute:
+                xc_trans, yc_trans = self.transform_model_to_world(xc_vals, yc_vals)
+                res = (xc_trans, yc_trans)
+            else:
+                res = (xc_vals, yc_vals)
+            
             self._cache['centroids'] = res
             return res
         
@@ -452,19 +600,31 @@ class NetcdfHandler:
         yv = self._get_topology_var('yv')
         
         if icv is not None and xv is not None and yv is not None:
+            # Detect if vertices are absolute
+            is_absolute = False
+            if self.xorigin != 0 or self.yorigin != 0:
+                if np.nanmean(np.abs(xv)) > np.abs(self.xorigin) * 0.5:
+                    is_absolute = True
+
+            # First transform vertices to world space if necessary
+            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_absolute:
+                xv_world, yv_world = self.transform_model_to_world(xv, yv)
+            else:
+                xv_world, yv_world = xv, yv
+
             nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
             n_cells = icv.shape[0]
             xc = np.full(n_cells, np.nan)
             yc = np.full(n_cells, np.nan)
             
-            # Use fast arithmetic mean for centroids
+            # Use fast arithmetic mean for centroids using world-space vertices
             for i in range(n_cells):
                 curr_v = icv[i]
                 v_idx = curr_v[curr_v != nodata]
                 if len(v_idx) >= 3:
                     try:
-                        xc[i] = np.mean(xv[v_idx])
-                        yc[i] = np.mean(yv[v_idx])
+                        xc[i] = np.mean(xv_world[v_idx])
+                        yc[i] = np.mean(yv_world[v_idx])
                     except:
                         pass
             
@@ -508,52 +668,68 @@ class NetcdfHandler:
 
         import numpy as np
         
-        # 1. Prepare Line
-        pts_coords = []
+        # 1. Prepare Line and Bounds
+        pts_world = []
+        pts_model = []
         for p in points:
-            if hasattr(p, 'x'): pts_coords.append((p.x(), p.y()))
-            else: pts_coords.append(p)
+            if hasattr(p, 'x'): wx, wy = p.x(), p.y()
+            else: wx, wy = p[0], p[1]
+            pts_world.append((wx, wy))
+            mx, my = self.transform_world_to_model(wx, wy)
+            pts_model.append((mx, my))
         
-        if len(pts_coords) < 2: return None
+        if len(pts_world) < 2: return None
         
         if shapely is None:
             # This should not happen if QGIS environment is correct as per user
             return {"error": "Shapely library is required for cross-sections."}
 
-        line = LineString(pts_coords)
-        bbox = line.bounds # (minx, miny, maxx, maxy)
+        line_model = LineString(pts_model)
+        bbox_model = line_model.bounds 
         
         # 2. Identify candidate cells and calculate intersections
         cell_segments = [] # List of {'d1':, 'd2':, 'idx':, 'cx':, 'cy':}
+        xc_all, yc_all = self._get_centroids() # These are World-Space (handled by updated _get_centroids)
         
         if self.grid_type == 'structured':
             x_v, y_v = self.ds.variables['x'][:], self.ds.variables['y'][:]
             dx = np.abs(x_v[1]-x_v[0]) if len(x_v) > 1 else 0
             dy = np.abs(y_v[1]-y_v[0]) if len(y_v) > 1 else 0
             
-            # Bound query
-            ix = np.where((x_v >= bbox[0] - dx) & (x_v <= bbox[2] + dx))[0]
-            iy = np.where((y_v >= bbox[1] - dy) & (y_v <= bbox[3] + dy))[0]
+            # Bound query in model space
+            ix = np.where((x_v >= bbox_model[0] - dx) & (x_v <= bbox_model[2] + dx))[0]
+            iy = np.where((y_v >= bbox_model[1] - dy) & (y_v <= bbox_model[3] + dy))[0]
             
             for r in iy:
                 for c in ix:
                     xc, yc = x_v[c], y_v[r]
                     p = box(xc - dx/2, yc - dy/2, xc + dx/2, yc + dy/2)
-                    if line.intersects(p):
-                        inter = intersection(line, p)
-                        for d1, d2 in self._get_line_segment_ranges(line, inter):
-                            cell_segments.append({'d1': d1, 'd2': d2, 'idx': (r, c), 'cx': xc, 'cy': yc})
+                    if line_model.intersects(p):
+                        inter = intersection(line_model, p)
+                        # Distances along line are calculated in model space (invariant)
+                        for d1, d2 in self._get_line_segment_ranges(line_model, inter):
+                            # Cell centroids for display (transformed to world space if not absolute)
+                            is_absolute = False
+                            if self.xorigin != 0 or self.yorigin != 0:
+                                if np.abs(xc) > np.abs(self.xorigin) * 0.5:
+                                    is_absolute = True
+                                    
+                            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_absolute:
+                                cw_x, cw_y = self.transform_model_to_world(xc, yc)
+                            else:
+                                cw_x, cw_y = xc, yc
+                            cell_segments.append({'d1': d1, 'd2': d2, 'idx': (r, c), 'cx': cw_x, 'cy': cw_y})
         else:
             # Vertex Grid
             icv = self._get_topology_var('icvert')
-            xv = self._get_topology_var('xv')
-            yv = self._get_topology_var('yv')
-            xc_all, yc_all = self._get_centroids()
+            xv_m = self._get_topology_var('xv') # Model Coordinates
+            yv_m = self._get_topology_var('yv') # Model Coordinates
             
-            if icv is None or xv is None or yv is None or xc_all is None: 
+            if icv is None or xv_m is None or yv_m is None or xc_all is None: 
                 return None
             
-            # Use Spatial Index (STRtree) for massive speedup on large grids
+            # Spatial Index (STRtree) for massive speedup on large grids
+            # Index is built in Model Space
             if 'strtree' not in self._cache and shapely:
                 nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
                 polys = []
@@ -561,7 +737,7 @@ class NetcdfHandler:
                 for i in range(len(icv)):
                     v_idx = icv[i][icv[i] != nodata]
                     if len(v_idx) >= 3:
-                        polys.append(Polygon(zip(xv[v_idx], yv[v_idx])))
+                        polys.append(Polygon(zip(xv_m[v_idx], yv_m[v_idx])))
                         poly_indices.append(i)
                 self._cache['polys'] = polys
                 self._cache['poly_indices'] = poly_indices
@@ -572,34 +748,40 @@ class NetcdfHandler:
                 all_polys = self._cache['polys']
                 all_indices = self._cache['poly_indices']
                 
-                # Query tree for cells intersecting the line
-                intersecting_indices = tree.query(line, predicate='intersects')
+                # Query tree for cells intersecting the line in model space
+                intersecting_indices = tree.query(line_model, predicate='intersects')
                 for idx_in_tree in intersecting_indices:
                     p = all_polys[idx_in_tree]
                     global_idx = all_indices[idx_in_tree]
-                    inter = intersection(line, p)
-                    for d1, d2 in self._get_line_segment_ranges(line, inter):
+                    inter = intersection(line_model, p)
+                    for d1, d2 in self._get_line_segment_ranges(line_model, inter):
                         cell_segments.append({
                             'd1': d1, 'd2': d2, 
                             'idx': int(global_idx), 
+                            # xc_all/yc_all are world-space from our updated _get_centroids
                             'cx': xc_all[global_idx], 
                             'cy': yc_all[global_idx]
                         })
             else:
-                # Fallback to bbox filtering if STRtree failed
-                c_mask = (xc_all >= bbox[0] - 1000) & (xc_all <= bbox[2] + 1000) & \
-                         (yc_all >= bbox[1] - 1000) & (yc_all <= bbox[3] + 1000)
+                # Fallback to bbox filtering in model space
+                c_mask = (self.ds.variables['xc'][:] >= bbox_model[0] - 1000) & (self.ds.variables['xc'][:] <= bbox_model[2] + 1000) & \
+                         (self.ds.variables['yc'][:] >= bbox_model[1] - 1000) & (self.ds.variables['yc'][:] <= bbox_model[3] + 1000)
                 cand_indices = np.where(c_mask)[0]
                 nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
                 
                 for i in cand_indices:
                     v_idx = icv[i][icv[i] != nodata]
                     if len(v_idx) < 3: continue
-                    p = Polygon(zip(xv[v_idx], yv[v_idx]))
-                    if line.intersects(p):
-                        inter = intersection(line, p)
-                        for d1, d2 in self._get_line_segment_ranges(line, inter):
-                            cell_segments.append({'d1': d1, 'd2': d2, 'idx': int(i), 'cx': xc_all[i], 'cy': yc_all[i]})
+                    p = Polygon(zip(xv_m[v_idx], yv_m[v_idx]))
+                    if line_model.intersects(p):
+                        inter = intersection(line_model, p)
+                        for d1, d2 in self._get_line_segment_ranges(line_model, inter):
+                            cell_segments.append({
+                                'd1': d1, 'd2': d2, 
+                                'idx': int(i), 
+                                'cx': xc_all[i], 
+                                'cy': yc_all[i]
+                            })
         if not cell_segments:
             return {"error": "No cells found along the cross-section line."}
 
@@ -815,8 +997,15 @@ class NetcdfHandler:
                     
                 xv_out = out_ds.createVariable('xv', 'f4', ('nnode',))
                 yv_out = out_ds.createVariable('yv', 'f4', ('nnode',))
-                xv_out[:] = xv_in[:]
-                yv_out[:] = yv_in[:]
+                
+                # Transform vertices to world space if rotated/moved
+                if self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0:
+                    xv_world, yv_world = self.transform_model_to_world(xv_in[:], yv_in[:])
+                    xv_out[:] = xv_world
+                    yv_out[:] = yv_world
+                else:
+                    xv_out[:] = xv_in[:]
+                    yv_out[:] = yv_in[:]
                 xv_out.standard_name = "projection_x_coordinate"
                 yv_out.standard_name = "projection_y_coordinate"
                 xv_out.units = "m"

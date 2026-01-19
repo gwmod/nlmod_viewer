@@ -209,6 +209,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.time_combo.blockSignals(False)
             
         self.populate_vars()
+        
+        # Update existing cross-sections with new data/variables
+        vars_3d = self.get_vars_3d()
+        for win in self.plot_windows.values():
+            win.refresh(vars_3d)
+            
         self.save_state_to_project()
 
     def populate_vars(self):
@@ -243,6 +249,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         self.layer_combo.setEnabled(has_layers)
         self.time_combo.setEnabled(has_times)
+
+    def get_vars_3d(self):
+        """Helper to identify variables that have a layer/vertical dimension."""
+        vars_3d = []
+        if not self.handler:
+            return vars_3d
+        try:
+            all_vars = self.handler.get_variables()
+            possible_layer_dims = {'layer', 'lev', 'level', 'z'}
+            for v in all_vars:
+                if any(d in possible_layer_dims for d in v.get('dimensions', [])):
+                    vars_3d.append(v['name'])
+        except:
+            pass
+        return vars_3d
 
     def add_layer(self):
         if not self.handler:
@@ -337,40 +358,41 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if time_str: layer_name += f" [{time_str}]"
             layer_name += f" @ {base_name}"
             
-            # --- VRT Workaround for Coordinates ---
-            # QGIS/GDAL often defaults to 0..N if grid mapping isn't standard.
-            # We explicitly calculate bounds and wrap in a VRT.
+            # --- VRT Workaround for Coordinates & Rotation ---
             try:
+                geotransform = self.handler.get_geotransform(var_name)
                 extent = self.handler.get_extent(var_name)
-                if extent:
-                    xmin, xmax, ymin, ymax, y_is_ascending = extent
-                    QgsMessageLog.logMessage(f"NLMOD: Using gdal.Translate with bounds: {xmin, ymin, xmax, ymax}", "NlmodInspector", Qgis.Info)
-                    
+                
+                if geotransform and extent:
                     from osgeo import gdal
-                    # Open the subdataset directly
                     subdataset_uri = f'NETCDF:"{safe_path}":{var_name}'
                     ds = gdal.Open(subdataset_uri)
                     if ds:
-                        # Use gdal.Translate to create a corrected VRT
-                        # outputBounds is [ulx, uly, lrx, lry]
-                        # By specifying [xmin, ymin, xmax, ymax], we force a standard North-Up orientation.
-                        # GDAL will automatically handle any necessary flipping of the source data.
-                        vrt_ds = gdal.Translate('', ds, format='VRT', 
-                                                outputBounds=[xmin, ymin, xmax, ymax], 
-                                                bandList=[band_idx])
+                        if self.handler.angrot == 0:
+                            # Standard Non-Rotated: Use Translate with outputBounds for auto-flipping
+                            xmin, xmax, ymin, ymax, y_is_ascending = extent
+                            vrt_ds = gdal.Translate('', ds, format='VRT', 
+                                                    outputBounds=[xmin, ymin, xmax, ymax], 
+                                                    bandList=[band_idx])
+                        else:
+                            # Rotated Grid: Manual Geotransform
+                            # Translate first just to extract the band and basic VRT structure
+                            vrt_ds = gdal.Translate('', ds, format='VRT', bandList=[band_idx])
+                            if vrt_ds:
+                                vrt_ds.SetGeoTransform(geotransform)
+                                # We might still need the CRS from the handler
+                                crs_wkt = self.handler.get_crs()
+                                if crs_wkt:
+                                    vrt_ds.SetProjection(crs_wkt)
                         
                         if vrt_ds:
                             vrt_xml = vrt_ds.GetMetadata('xml:VRT')[0]
                             vrt_ds = None # Close
                             
-                            # If Y is ascending (South-to-North), we need to flip the source rectangle in the VRT
+                            # Handle Ascending Y if necessary
+                            # (Same logic as before, but ensure it works with rotated matrices)
+                            y_is_ascending = extent[4]
                             if y_is_ascending:
-                                # We need to find <SrcRect xOff="0" yOff="0" xSize="W" ySize="H" />
-                                # and change it to <SrcRect xOff="0" yOff="H" xSize="W" ySize="-H" />
-                                import re
-                                # Find yOff="0" and replace with yOff="{y_size}"
-                                # Find ySize="{y_size}" and replace with ySize="-{y_size}"
-                                # We can get y_size from the VRT XML itself or use the variable info
                                 var_info = self.handler.ds.variables[var_name]
                                 y_size = var_info.shape[-2] if var_info.ndim >= 2 else 0
                                 if y_size > 0:
@@ -378,25 +400,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                                     vrt_xml = vrt_xml.replace(f'ySize="{y_size}"', f'ySize="-{y_size}"')
                                     QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NlmodInspector", Qgis.Info)
                         else:
-                            QgsMessageLog.logMessage("NLMOD: gdal.Translate failed to create VRT.", "NlmodInspector", Qgis.Warning)
                             raise Exception("gdal.Translate failed")
                         ds = None
                     else:
-                        QgsMessageLog.logMessage(f"NLMOD: Could not open subdataset {subdataset_uri}", "NlmodInspector", Qgis.Warning)
                         raise Exception("Could not open subdataset")
 
-                    # Save to vsimem (or temporary file if vsimem assumes path)
-                    # QgsRasterLayer takes a path. 
-                    # We can pass the XML content directly? No, usually needs a path.
-                    # But we can write to /vsimem/
-                    from osgeo import gdal
+                    # Save to vsimem
                     vrt_mem_path = f"/vsimem/{var_name}_{band_idx}_{id(self)}.vrt"
                     gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
-                    
                     uri = vrt_mem_path
-                    QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri} for band {band_idx}", "NlmodInspector", Qgis.Info)
+                    QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri} (angrot={self.handler.angrot})", "NlmodInspector", Qgis.Info)
                 else:
-                     QgsMessageLog.logMessage(f"NLMOD: Extent not found for {var_name}", "NlmodInspector", Qgis.Warning)
+                     QgsMessageLog.logMessage(f"NLMOD: Could not calculate placement for {var_name}", "NlmodInspector", Qgis.Warning)
 
             except Exception as e:
                 import traceback
@@ -721,14 +736,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return
 
         # 1. Get all 3D variables for the combo box
-        vars_3d = []
-        try:
-            all_vars = self.handler.get_variables()
-            possible_layer_dims = {'layer', 'lev', 'level', 'z'}
-            for v in all_vars:
-                if any(d in possible_layer_dims for d in v.get('dimensions', [])):
-                    vars_3d.append(v['name'])
-        except:
+        vars_3d = self.get_vars_3d()
+        if not vars_3d:
             vars_3d = [var_name]
 
         # 2. Extract Data

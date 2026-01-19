@@ -342,19 +342,49 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             # Fetch new data
             new_data = self.data_fetcher(var_name, self.points)
             if new_data:
+                if "error" in new_data:
+                    QtWidgets.QMessageBox.warning(self, "Data Error", new_data['error'])
+                    return
+
                 self.data = new_data
                 self.current_var = var_name
+                
+                # Reset Data Range (v_min/v_max) so it's recalculated for the new variable
+                # This addresses the user's request for "date range" (intended "data range") updates.
+                self.v_min = None
+                self.v_max = None
+                
                 self.setWindowTitle(f"Cross Section {self.cs_label}: {var_name}")
                 
                 # Clear info
                 self.info_label.setText("Click in plot to see cell info")
                 
                 self.render_data(self.data, vertex_distances=self.vertex_distances)
-                # Notify dock widget
+                # Notify dock widget of variable and range change
                 if self.item_id:
                     self.variable_changed.emit(self.item_id, var_name)
+                    self.range_changed.emit()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch data for {var_name}: {e}")
+
+    def refresh(self, all_vars=None):
+        """Updates the available variables and reloads data for the current window."""
+        if all_vars is not None:
+            self.all_vars = all_vars
+            self.var_combo.blockSignals(True)
+            self.var_combo.clear()
+            self.var_combo.addItems(self.all_vars)
+            if self.current_var in self.all_vars:
+                self.var_combo.setCurrentText(self.current_var)
+            else:
+                # current variable not in the new file, use first 3d variable
+                if self.all_vars:
+                    self.current_var = self.all_vars[0]
+                    self.var_combo.setCurrentText(self.current_var)
+            self.var_combo.blockSignals(False)
+        
+        # Reload currently selected variable
+        self.change_variable(self.current_var)
 
     def on_mouse_moved(self, pos):
         if not self.plot_widget.plotItem.sceneBoundingRect().contains(pos):
@@ -510,13 +540,13 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             return
             
         if v_min is None:
-            if hasattr(self, '_first_render_done'):
+            if hasattr(self, '_first_render_done') and self.v_min is not None:
                 v_min = self.v_min
             else:
                 v_min = np.nanmin(valid_vals)
                 
         if v_max is None:
-            if hasattr(self, '_first_render_done'):
+            if hasattr(self, '_first_render_done') and self.v_max is not None:
                 v_max = self.v_max
             else:
                 v_max = np.nanmax(valid_vals)
