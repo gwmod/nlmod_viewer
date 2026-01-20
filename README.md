@@ -37,28 +37,36 @@ A QGIS plugin for inspecting input and output of groundwater models built with [
   pip install pyqtgraph
   ```
 
-## Usage
+### Map Layer Visualization
 
-1. Click the **NLMOD Inspector** icon in the toolbar or select it from the Plugins menu
-2. A dock widget will appear on the left side
-3. Click **Browse...** to select your NetCDF file (`.nc`, `.nc4`, or `.hdf5`)
-4. The plugin will display:
-   - File metadata and grid type
-   - Available variables (model inputs/outputs)
-5. Select a variable from the list
-6. If the variable has multiple layers, select the desired layer from the dropdown
-7. Click **Add to Map** to load the layer
-8. Use QGIS tools to interact with the layer:
-   - **Identify Tool**: Click to see values
-   - **Layer Properties**: Adjust styling and symbology
-   - **Temporal Controller**: Animate time-series data
+1. Click the **NLMOD Inspector** icon in the toolbar or select it from the Plugins menu.
+2. A dock widget will appear on the left side.
+3. Click **Browse...** to select your NetCDF file (`.nc`, `.nc4`, or `.hdf5`).
+4. The plugin will display file metadata and grid type.
+5. **Variables List**:
+   - Browse availabe model variables.
+   - **Right-click** a variable and select **Show Attributes** to view detailed metadata (dimensions, units, description).
+6. Select a variable to plot.
+7. If applicable, select a **Layer** and **Time Step** from the dropdowns.
+8. Click **Add to Map** to load the layer into QGIS.
 
 ### Cross-Section Plotting
 
-1. Select a variable with layer data
-2. Click **Plot Cross-Section**
-3. Draw a line on the map
-4. A plot window will show the cross-section through the model layers
+Manage cross-sections using the dedicated group at the bottom of the dock widget.
+
+1. **Create**: Click **Add** and click on the map to define the cross-section line. Right-click to finish drawing.
+2. **Interact**: Double-click an item in the list to bring its plot window to the front.
+3. **Manage**: 
+   - **Right-click** an item in the list to **Rename**, **Edit Vertices**, **Move Up**, or **Move Down**.
+   - Select an item and click **Remove** to delete it.
+
+#### Cross-Section Window Features
+- **Variable Selection**: Switch the plotted variable dynamically using the dropdown at the top.
+- **Navigation**: Zoom and pan with the mouse.
+- **Interactivity**: Click anywhere in the plot to see the specific cell value, layer, and coordinates.
+- **Settings**: Click the **Settings...** button to configure:
+  - **Appearance**: Toggle Layer Boundaries, Cell Boundaries, and **Show Layer Names** (labels placed at the thickest part of the layer).
+  - **Color Scale**: Set Min/Max values, toggle **Log Scale**, choose a **Colormap** (defaults to Turbo), and **Invert** the colors.
 
 ## Grid Type Support
 
