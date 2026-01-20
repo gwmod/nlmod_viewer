@@ -9,7 +9,7 @@ except ImportError:
     PColorMeshItem = None
 
 class SettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False,
+    def __init__(self, parent=None, show_layer_boundaries=False, show_cell_boundaries=False, show_layer_names=False,
                  v_min=None, v_max=None, use_log=False, cmap_name='Turbo', invert_cmap=False):
         super().__init__(parent)
         self.setWindowTitle("Cross Section Settings")
@@ -25,6 +25,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.chk_cell_boundaries = QtWidgets.QCheckBox("Show Cell Boundaries")
         self.chk_cell_boundaries.setChecked(show_cell_boundaries)
         app_layout.addWidget(self.chk_cell_boundaries)
+
+        self.chk_layer_names = QtWidgets.QCheckBox("Show Layer Names")
+        self.chk_layer_names.setChecked(show_layer_names)
+        app_layout.addWidget(self.chk_layer_names)
         layout.addWidget(appearance_group)
         
         # Color Scale Group
@@ -113,7 +117,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     settings_changed = QtCore.pyqtSignal()
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
                  item_id=None, all_vars=None, data_fetcher=None, label="A", points=None,
-                 z_range=None, v_range=None, show_layers=True, show_cells=False,
+                 z_range=None, v_range=None, show_layers=True, show_cells=False, show_layer_names=False,
                  use_log=False, cmap_name='Turbo', invert_cmap=False):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
@@ -124,6 +128,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.points = points
         self.show_layer_boundaries = show_layers 
         self.show_cell_boundaries = show_cells
+        self.show_layer_names = show_layer_names
         self.use_log = use_log
         self.cmap_name = cmap_name
         self.invert_cmap = invert_cmap
@@ -198,6 +203,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.data = data
         self.colorbar = None
         self.vertex_lines = []
+        self.label_items = []
         self.vertex_distances = vertex_distances
         
         # Plot Widget
@@ -296,11 +302,13 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         dlg = SettingsDialog(self, 
                              show_layer_boundaries=self.show_layer_boundaries, 
                              show_cell_boundaries=self.show_cell_boundaries,
+                             show_layer_names=self.show_layer_names,
                              v_min=self.v_min, v_max=self.v_max, use_log=self.use_log,
                              cmap_name=self.cmap_name, invert_cmap=self.invert_cmap)
         if dlg.exec_():
             new_layer_boundaries = dlg.chk_boundaries.isChecked()
             new_cell_boundaries = dlg.chk_cell_boundaries.isChecked()
+            new_layer_names = dlg.chk_layer_names.isChecked()
             new_v_min = dlg.v_min_spin.value()
             new_v_max = dlg.v_max_spin.value()
             new_use_log = dlg.chk_log.isChecked()
@@ -310,6 +318,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             changed = False
             if (new_layer_boundaries != self.show_layer_boundaries or 
                 new_cell_boundaries != self.show_cell_boundaries or
+                new_layer_names != self.show_layer_names or
                 new_v_min != self.v_min or
                 new_v_max != self.v_max or
                 new_use_log != self.use_log or
@@ -318,6 +327,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 
                 self.show_layer_boundaries = new_layer_boundaries
                 self.show_cell_boundaries = new_cell_boundaries
+                self.show_layer_names = new_layer_names
                 self.v_min = new_v_min
                 self.v_max = new_v_max
                 self.use_log = new_use_log
@@ -523,6 +533,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.colorbar = None
         
         self.vertex_lines = []
+        self.label_items = []
             
         # Unpack
         dists = data['distances']
@@ -551,11 +562,10 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             else:
                 v_max = np.nanmax(valid_vals)
         
-        # Update internal state if this is first render
-        if not hasattr(self, '_first_render_done'):
-            self.v_min = v_min
-            self.v_max = v_max
-            self._first_render_done = True
+        # Update stored range (locks auto-scale to first calculated value)
+        self.v_min = v_min
+        self.v_max = v_max
+        self._first_render_done = True
         
         # Optimized Rendering using PColorMeshItem if available
         if PColorMeshItem is not None:
@@ -641,6 +651,44 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                     if not np.isnan(z_t) and not np.isnan(z_b):
                         line = pg.PlotCurveItem([d, d], [z_t, z_b], pen=pen)
                         self.plot_widget.addItem(line)
+                        
+            # Show Layer Names at thickest part
+            if self.show_layer_names and 'layer_names' in data:
+                layer_names = data['layer_names']
+                for i in range(num_layers):
+                    # Calculate segment thicknesses for this layer
+                    # Layer i top: y_mesh[i], bot: y_mesh[i+1]
+                    # We compute average thickness for each interval [j, j+1]
+                    l_top = y_mesh[i, :]
+                    l_bot = y_mesh[i+1, :]
+                    
+                    # Mid-points for x
+                    x_mids = (dists[:-1] + dists[1:]) / 2
+                    
+                    # Avg thickness
+                    t_avg = ((l_top[:-1] - l_bot[:-1]) + (l_top[1:] - l_bot[1:])) / 2
+                    
+                    # Find max
+                    # Handle NaNs
+                    valid_mask = np.isfinite(t_avg)
+                    if not np.any(valid_mask): continue
+                    
+                    # Zero out invalid to find max
+                    t_clean = np.where(valid_mask, t_avg, -1.0)
+                    j_max = np.argmax(t_clean)
+                    
+                    if t_clean[j_max] <= 0: continue
+                    
+                    # Position
+                    x_pos = x_mids[j_max]
+                    y_pos = (l_top[j_max] + l_bot[j_max] + l_top[j_max+1] + l_bot[j_max+1]) / 4
+                    
+                    # Add Label
+                    name_idx = i % len(layer_names)
+                    txt = pg.TextItem(layer_names[name_idx], anchor=(0.5, 0.5), color='k')
+                    txt.setPos(x_pos, y_pos)
+                    self.plot_widget.addItem(txt)
+                    self.label_items.append(txt)
         else:
             # Fallback to slower custom Item
             self.dataset_item = CrossSectionMeshItem(
@@ -675,6 +723,12 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         axis = self.colorbar.getAxis('right')
         axis.setPen('k')
         axis.setTextPen('k')
+        
+        # Set Label from metadata
+        desc = data.get('description', self.current_var)
+        units = data.get('units', '')
+        label_text = f"{desc} ({units})" if units else desc
+        axis.setLabel(label_text, **{'color': '#000', 'font-size': '10pt'})
         
         if self.use_log:
             # Custom formatter to show real values (10^x)

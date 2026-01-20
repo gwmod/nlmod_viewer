@@ -905,6 +905,14 @@ class NetcdfHandler:
             nm = self.ds.variables.get('layer', [str(i+1) for i in range(botm.shape[0])])[:]
             layer_names = [str(x) for x in nm] if hasattr(nm, '__len__') else [str(i+1) for i in range(botm.shape[0])]
 
+            # 6. Metadata
+            var_desc = variable_name
+            var_units = ""
+            if variable_name in self.ds.variables:
+                v_obj = self.ds.variables[variable_name]
+                var_desc = getattr(v_obj, 'long_name', getattr(v_obj, 'description', variable_name))
+                var_units = getattr(v_obj, 'units', "")
+
             return {
                 "distances": final_dists,
                 "top": top,
@@ -914,7 +922,9 @@ class NetcdfHandler:
                 "cell_x": cell_x,
                 "cell_y": cell_y,
                 "layer_names": layer_names,
-                "num_layers": botm.shape[0]
+                "num_layers": botm.shape[0],
+                "description": var_desc,
+                "units": var_units
             }
 
         except Exception as e:

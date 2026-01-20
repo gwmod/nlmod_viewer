@@ -16,7 +16,7 @@ class NlmodInspector:
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         icon_path = os.path.join(self.plugin_dir, 'icons', 'icon.png')
         self.action = QAction(QIcon(icon_path), "NLMOD Inspector", self.iface.mainWindow())
-        self.action.setToolTip("Inspect NLMOD groundwater NetCDF files")
+        self.action.setToolTip("Inspect NLMOD NetCDF files")
         self.action.triggered.connect(self.run)
         
         # Add to the Plugins menu

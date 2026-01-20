@@ -100,6 +100,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.var_list = QtWidgets.QListWidget()
         self.var_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.var_list.itemSelectionChanged.connect(self.update_layer_selection)
+        self.var_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.var_list.customContextMenuRequested.connect(self.handle_var_context_menu)
         layer_group_layout.addWidget(QtWidgets.QLabel("Variables:"))
         layer_group_layout.addWidget(self.var_list)
 
@@ -264,6 +266,43 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except:
             pass
         return vars_3d
+
+    def handle_var_context_menu(self, point):
+        item = self.var_list.itemAt(point)
+        if not item:
+            return
+            
+        var_name = item.data(QtCore.Qt.UserRole)
+        menu = QtWidgets.QMenu(self.var_list)
+        
+        info_action = menu.addAction("Show Attributes")
+        
+        action = menu.exec_(self.var_list.mapToGlobal(point))
+        
+        if action == info_action:
+            self.show_variable_info(var_name)
+            
+    def show_variable_info(self, var_name):
+        if not self.handler: return
+        
+        # Find variable metadata
+        try:
+            vars = self.handler.get_variables()
+            var_meta = next((v for v in vars if v['name'] == var_name), None)
+            
+            if var_meta:
+                # Also fetch attributes from the netcdf variable directly for completeness
+                # (The handler summary might be limited)
+                # But we can reconstruct a nice message
+                msg = []
+                msg.append(f"<b>Variable:</b> {var_name}")
+                msg.append(f"<b>Dimensions:</b> {', '.join(var_meta['dimensions'])}")
+                msg.append(f"<b>Description:</b> {var_meta['description']}")
+                
+                # Show in a message box
+                QtWidgets.QMessageBox.information(self, f"Attributes: {var_name}", "<br>".join(msg))
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Error", f"Could not fetch info: {e}")
 
     def add_layer(self):
         if not self.handler:
@@ -729,7 +768,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
     def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
                                z_range=None, v_range=None, visible=True,
-                               show_layers=True, show_cells=False, use_log=False,
+                               show_layers=True, show_cells=False, show_layer_names=True, use_log=False,
                                cmap_name='Turbo', invert_cmap=False):
         """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
@@ -785,8 +824,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 data, var_name, self, vertex_distances=v_dists,
                 item_id=item_id, all_vars=vars_3d, data_fetcher=self.fetch_cross_section_data,
                 label=cs_label, points=points, z_range=z_range, v_range=v_range,
-                show_layers=show_layers, show_cells=show_cells, use_log=use_log,
-                cmap_name=cmap_name, invert_cmap=invert_cmap
+                show_layers=show_layers, show_cells=show_cells, show_layer_names=show_layer_names,
+                use_log=use_log, cmap_name=cmap_name, invert_cmap=invert_cmap
             )
             win.variable_changed.connect(self.update_cs_list_label)
             win.cursor_moved.connect(self.on_cs_cursor_moved)
@@ -983,12 +1022,30 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         rename_action = menu.addAction("Rename")
         edit_pts_action = menu.addAction("Edit vertices...")
         
+        menu.addSeparator()
+        
+        move_up = menu.addAction("Move Up")
+        move_down = menu.addAction("Move Down")
+        
         action = menu.exec_(self.cs_list.mapToGlobal(pos))
         
         if action == rename_action:
             self.rename_cross_section(item)
         elif action == edit_pts_action:
             self.edit_cross_section_vertices(item_id)
+        elif action == move_up:
+            self.move_cs_item(item, -1)
+        elif action == move_down:
+            self.move_cs_item(item, 1)
+
+    def move_cs_item(self, item, direction):
+        row = self.cs_list.row(item)
+        new_row = row + direction
+        if 0 <= new_row < self.cs_list.count():
+            current = self.cs_list.takeItem(row)
+            self.cs_list.insertItem(new_row, current)
+            self.cs_list.setCurrentItem(current)
+            self.save_state_to_project()
 
     def rename_cross_section(self, item):
         item_id = item.data(QtCore.Qt.UserRole)
@@ -1245,6 +1302,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     'visible': win.isVisible(),
                     'show_layers': win.show_layer_boundaries,
                     'show_cells': win.show_cell_boundaries,
+                    'show_layer_names': win.show_layer_names,
                     'use_log': win.use_log,
                     'cmap': win.cmap_name,
                     'invert_cmap': win.invert_cmap
@@ -1294,6 +1352,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             visible=cs.get('visible', True),
                             show_layers=cs.get('show_layers', True),
                             show_cells=cs.get('show_cells', False),
+                            show_layer_names=cs.get('show_layer_names', True),
                             use_log=cs.get('use_log', False),
                             cmap_name=cs.get('cmap', 'Turbo'),
                             invert_cmap=cs.get('invert_cmap', False)
