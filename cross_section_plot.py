@@ -613,14 +613,27 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                         # Use elevation from start of cell block
                         y_mesh[:, s:e] = y_mesh[:, s][:, None]
             
-            # Create PColorMeshItem
-            self.dataset_item = PColorMeshItem(
+            if not np.isnan(z_mesh).any():
+                # Create PColorMeshItem
+                self.dataset_item = PColorMeshItem(
                 x_mesh, y_mesh, z_mesh,
-                colorMap=cmap,
-                antialiasing=False
-            )
-            self.dataset_item.setLevels((render_min, render_max))
-            self.plot_widget.addItem(self.dataset_item)
+                    colorMap=cmap,
+                    antialiasing=False
+                )
+                self.dataset_item.setLevels((render_min, render_max))
+                self.plot_widget.addItem(self.dataset_item)
+            else:
+                # Fallback to slower custom Item if PColorMeshItem fails (e.g. older versions or NaN coords)
+                from qgis.core import QgsMessageLog, Qgis
+                QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NlmodInspector", Qgis.Info)
+                self.dataset_item = CrossSectionMeshItem(
+                    dists, top, botm, vals, cmap, (v_min, v_max), 
+                    show_layer_boundaries=False, # Item handles its own
+                    show_cell_boundaries=False,
+                    indices=data.get('indices'),
+                    use_log=self.use_log
+                )
+                self.plot_widget.addItem(self.dataset_item)
             
             # Add Optional Layer Boundaries using PlotCurveItem (very fast)
             if self.show_layer_boundaries:

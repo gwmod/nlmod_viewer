@@ -265,8 +265,8 @@ class NetcdfHandler:
         layers = []
         times = []
         
-        possible_layers = {'layer', 'lev', 'level', 'z'}
-        possible_times = {'time', 't', 'date'}
+        possible_layers = {'layer', 'z'}
+        possible_times = {'time'}
         
         # Look for these dimensions in the variables
         for d in self.ds.dimensions:
@@ -313,7 +313,7 @@ class NetcdfHandler:
         # Common coordinate/topology variables to exclude
         exclude = {
             'x', 'y', 'lat', 'lon', 'latitude', 'longitude', 
-            'time', 'layer', 'lev', 'level',
+            'time', 'layer',
             'mesh2d', 'mesh2d_face_nodes', 'mesh2d_edge_nodes', 
             'mesh2d_node_x', 'mesh2d_node_y', 'time_bnds',
             'crs', 'grid_mapping', 'spatial_ref',
@@ -336,13 +336,13 @@ class NetcdfHandler:
             layer_dim = None
             layer_size = 0
             layer_values = []
-            possible_layers = {'layer', 'lev', 'level', 'z'}
+            possible_layers = {'layer', 'z'}
             
             # Detect time dim
             time_dim = None
             time_size = 0
             time_values = []
-            possible_times = {'time', 't', 'date'}
+            possible_times = {'time'}
 
             for d in var.dimensions:
                 if d in possible_layers:
@@ -825,15 +825,11 @@ class NetcdfHandler:
                 def get_v(v):
                     if v not in self.ds.variables: return None
                     d = self.ds.variables[v]
-                    
-                def get_v(v):
-                    if v not in self.ds.variables: return None
-                    d = self.ds.variables[v]
                     dims = d.dimensions
                     sl = [slice(None)] * d.ndim
                     
                     # Apply Time selection
-                    possible_times = {'time', 't', 'date'}
+                    possible_times = {'time'}
                     for i, dim_name in enumerate(dims):
                         if dim_name in possible_times:
                             sl[i] = time_idx
@@ -878,7 +874,7 @@ class NetcdfHandler:
                     sl = [slice(None)] * d.ndim
                     
                     # Apply Time selection
-                    possible_times = {'time', 't', 'date'}
+                    possible_times = {'time'}
                     for i, dim_name in enumerate(dims):
                         if dim_name in possible_times:
                             sl[i] = time_idx
@@ -955,14 +951,14 @@ class NetcdfHandler:
             sl = [slice(None)] * var.ndim
             
             # Handle Layer Dim
-            possible_layers = {'layer', 'lev', 'level', 'z'}
+            possible_layers = {'layer', 'z'}
             for i, d in enumerate(dims):
                 if d in possible_layers:
                     sl[i] = layer_idx
                     break
             
             # Handle Time Dim
-            possible_times = {'time', 't', 'date'}
+            possible_times = {'time'}
             for i, d in enumerate(dims):
                 if d in possible_times:
                     sl[i] = time_idx
