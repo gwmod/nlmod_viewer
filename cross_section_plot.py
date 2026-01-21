@@ -116,14 +116,17 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     range_changed = QtCore.pyqtSignal()
     settings_changed = QtCore.pyqtSignal()
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
-                 item_id=None, all_vars=None, data_fetcher=None, label="A", points=None,
+                 item_id=None, all_vars=None, head_vars=None, data_fetcher=None, label="A", points=None,
                  z_range=None, v_range=None, show_layers=True, show_cells=False, show_layer_names=False,
                  use_log=False, cmap_name='Turbo', invert_cmap=False):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
         self.data_fetcher = data_fetcher
         self.all_vars = all_vars or [variable_name]
+        self.head_vars = ["None"] + (head_vars or self.all_vars)
         self.current_var = variable_name
+        self.current_head_var = "None"
+        self.head_data = None
         self.cs_label = label
         self.points = points
         self.show_layer_boundaries = show_layers 
@@ -154,6 +157,16 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.var_combo.setCurrentText(self.current_var)
         self.var_combo.currentTextChanged.connect(self.change_variable)
         tools_layout.addWidget(self.var_combo)
+        
+        tools_layout.addSpacing(10)
+        
+        # Head Selection (Wet Part)
+        tools_layout.addWidget(QtWidgets.QLabel("Wet Top (Head):"))
+        self.head_combo = QtWidgets.QComboBox()
+        self.head_combo.addItems(self.head_vars)
+        self.head_combo.setCurrentText("None")
+        self.head_combo.currentTextChanged.connect(self.change_head_variable)
+        tools_layout.addWidget(self.head_combo)
         
         tools_layout.addSpacing(20)
         
@@ -377,8 +390,34 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch data for {var_name}: {e}")
 
-    def refresh(self, all_vars=None):
+    def change_head_variable(self, head_var_name):
+        self.current_head_var = head_var_name
+        if head_var_name == "None":
+            self.head_data = None
+        else:
+            try:
+                self.head_data = self.data_fetcher(head_var_name, self.points)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch head data for {head_var_name}: {e}")
+                self.head_data = "Error"
+        
+        # Re-render with existing data
+        self.render_data(self.data, vertex_distances=self.vertex_distances)
+
+    def refresh(self, all_vars=None, head_vars=None):
         """Updates the available variables and reloads data for the current window."""
+        if head_vars is not None:
+            self.head_vars = ["None"] + head_vars
+            self.head_combo.blockSignals(True)
+            self.head_combo.clear()
+            self.head_combo.addItems(self.head_vars)
+            if self.current_head_var in self.head_vars:
+                self.head_combo.setCurrentText(self.current_head_var)
+            else:
+                self.current_head_var = "None"
+                self.head_combo.setCurrentText("None")
+            self.head_combo.blockSignals(False)
+
         if all_vars is not None:
             self.all_vars = all_vars
             self.var_combo.blockSignals(True)
@@ -393,7 +432,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                     self.var_combo.setCurrentText(self.current_var)
             self.var_combo.blockSignals(False)
         
-        # Reload currently selected variable
+        # Reload current head if selected
+        if self.current_head_var != "None":
+            self.change_head_variable(self.current_head_var)
+
+        # Reload currently selected main variable
         self.change_variable(self.current_var)
 
     def on_mouse_moved(self, pos):
@@ -537,9 +580,31 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             
         # Unpack
         dists = data['distances']
-        top = data['top']
-        botm = data['botm']
+        top = data['top'].copy()
+        botm = data['botm'].copy()
         vals = data['values']
+        
+        # 0. Sync Head Data if necessary
+        if self.current_head_var != "None":
+            # Re-fetch if head data is missing, erroneous, or doesn't match the current cross-section points
+            points_changed = False
+            if self.head_data is not None and self.head_data != "Error":
+                h_dists = self.head_data.get('distances', [])
+                if len(h_dists) != len(dists):
+                    points_changed = True
+                elif len(dists) > 0 and not np.isclose(h_dists[0], dists[0]):
+                    points_changed = True
+            
+            if self.head_data is None or self.head_data == "Error" or points_changed:
+                try:
+                    # Use the points currently stored in the window
+                    res = self.data_fetcher(self.current_head_var, self.points)
+                    if res and "error" not in res:
+                        self.head_data = res
+                    else:
+                        self.head_data = "Error"
+                except:
+                    self.head_data = "Error"
         
         # Color Map
         cmap = self.get_pyqtgraph_cmap(self.cmap_name, invert=self.invert_cmap)
@@ -566,6 +631,41 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.v_min = v_min
         self.v_max = v_max
         self._first_render_done = True
+        
+        # Apply "Wet Part" logic if head_data is available
+        if self.head_data and self.head_data != "Error":
+            h_vals = self.head_data['values']
+            num_layers = botm.shape[0]
+            
+            # Treat NaNs in head as "dry"
+            h_safe = np.nan_to_num(h_vals, nan=-1e30)
+            
+            # We build the mesh boundaries by stacking only the wet thicknesses
+            # on top of the absolute bottom. This ensures zero-thickness for dry cells
+            # and prevents "layer shifting" where dry space was being filled by upper layers.
+            curr_elev = data['botm'][-1, :].copy() 
+            new_boundaries = [curr_elev]
+            
+            for i in range(num_layers - 1, -1, -1):
+                # Use original reference boundaries from the data dictionary
+                l_top_orig = data['top'] if i == 0 else data['botm'][i-1, :]
+                l_bot_orig = data['botm'][i, :]
+                h_layer = h_safe[i, :] if h_safe.ndim > 1 else h_safe
+                
+                # Saturated thickness of this layer
+                wet_top = np.minimum(l_top_orig, h_layer)
+                wet_thick = np.maximum(0, wet_top - l_bot_orig)
+                
+                curr_elev = curr_elev + wet_thick
+                new_boundaries.append(curr_elev)
+            
+            # new_boundaries is [AbsoluteBottom, TopLast, ..., Top0]
+            new_boundaries.reverse()
+            # Now: [Top0, Top1, ..., BotLast]
+            
+            top = new_boundaries[0]
+            for i in range(num_layers):
+                botm[i, :] = new_boundaries[i+1]
         
         # Optimized Rendering using PColorMeshItem if available
         if PColorMeshItem is not None:

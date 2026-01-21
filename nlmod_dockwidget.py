@@ -214,8 +214,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Update existing cross-sections with new data/variables
         vars_3d = self.get_vars_3d()
+        all_vars = self.get_all_vars()
         for win in self.plot_windows.values():
-            win.refresh(vars_3d)
+            win.refresh(vars_3d, head_vars=all_vars)
             
         self.save_state_to_project()
 
@@ -266,6 +267,15 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except:
             pass
         return vars_3d
+
+    def get_all_vars(self):
+        """Helper to get all variable names."""
+        if not self.handler:
+            return []
+        try:
+            return [v['name'] for v in self.handler.get_variables()]
+        except:
+            return []
 
     def handle_var_context_menu(self, point):
         item = self.var_list.itemAt(point)
@@ -778,6 +788,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         vars_3d = self.get_vars_3d()
         if not vars_3d:
             vars_3d = [var_name]
+        
+        all_vars = self.get_all_vars()
 
         # 2. Extract Data
         try:
@@ -822,7 +834,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # 4. Show Window
             win = CrossSectionPlotWindow(
                 data, var_name, self, vertex_distances=v_dists,
-                item_id=item_id, all_vars=vars_3d, data_fetcher=self.fetch_cross_section_data,
+                item_id=item_id, all_vars=vars_3d, head_vars=all_vars, data_fetcher=self.fetch_cross_section_data,
                 label=cs_label, points=points, z_range=z_range, v_range=v_range,
                 show_layers=show_layers, show_cells=show_cells, show_layer_names=show_layer_names,
                 use_log=use_log, cmap_name=cmap_name, invert_cmap=invert_cmap
@@ -874,6 +886,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             self.highlight_cross_section(item)
             self.save_state_to_project()
+            return win
             
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Plot Error", f"Failed to plot: {e}")
@@ -1296,6 +1309,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     'id': item_id,
                     'label': win.cs_label,
                     'variable': win.current_var,
+                    'head_variable': win.current_head_var,
                     'points': [(float(p.x()), float(p.y())) for p in points],
                     'z_range': (float(win.z_min_spin.value()), float(win.z_max_spin.value())),
                     'v_range': (v_min, v_max),
@@ -1342,7 +1356,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     cs_list = json.loads(cs_json)
                     for cs in cs_list:
                         points = [QgsPointXY(p[0], p[1]) for p in cs['points']]
-                        self.add_cross_section_plot(
+                        win = self.add_cross_section_plot(
                             points, 
                             cs['variable'], 
                             cs_label=cs['label'], 
@@ -1357,6 +1371,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             cmap_name=cs.get('cmap', 'Turbo'),
                             invert_cmap=cs.get('invert_cmap', False)
                         )
+                        # Set head variable if it was saved
+                        if win and cs.get('head_variable'):
+                            win.head_combo.setCurrentText(cs['head_variable'])
                 except Exception as e:
                     QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)
             else:
