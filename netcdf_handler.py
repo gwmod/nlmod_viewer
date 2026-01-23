@@ -1051,16 +1051,22 @@ class NetcdfHandler:
                 mesh_v.face_node_connectivity_filler_value = nodata
 
             # The Data Variable
-            data_v = out_ds.createVariable(var_name, 'f4', ('icell2d',))
+            import numpy as np
+            fill_val = -9999.0 # Explicit float fill value for compatibility
+            
+            data_v = out_ds.createVariable(var_name, 'f4', ('icell2d',), fill_value=fill_val)
             # Handle masked arrays
             if isinstance(data, np.ma.MaskedArray):
-                data_v[:] = data.filled(np.nan)
+                data_v[:] = data.filled(fill_val)
             else:
-                data_v[:] = data
+                # Replace NaNs with fill value
+                data_clean = np.where(np.isnan(data), fill_val, data)
+                data_v[:] = data_clean
                 
             data_v.mesh = "mesh2d"
             data_v.location = "face"
             data_v.standard_name = var_name
+            data_v.long_name = var_name
             
             out_ds.Conventions = "UGRID-1.0"
             out_ds.close()

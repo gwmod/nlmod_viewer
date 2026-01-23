@@ -64,15 +64,15 @@ class MainSettingsDialog(QtWidgets.QDialog):
         group = QtWidgets.QGroupBox("Update map")
         group_layout = QtWidgets.QVBoxLayout()
         
-        self.chk_var = QtWidgets.QCheckBox("Update map when variable changes")
+        self.chk_var = QtWidgets.QCheckBox("When variable changes")
         self.chk_var.setChecked(auto_var)
         group_layout.addWidget(self.chk_var)
         
-        self.chk_layer = QtWidgets.QCheckBox("Update map when layer changes")
+        self.chk_layer = QtWidgets.QCheckBox("When layer changes")
         self.chk_layer.setChecked(auto_layer)
         group_layout.addWidget(self.chk_layer)
         
-        self.chk_time = QtWidgets.QCheckBox("Update map when time changes")
+        self.chk_time = QtWidgets.QCheckBox("When time changes")
         self.chk_time.setChecked(auto_time)
         group_layout.addWidget(self.chk_time)
         
@@ -411,6 +411,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if self.layer_combo.isEnabled(): display_name += f" ({layer_val})"
         if time_val: display_name += f" [{time_val}]"
         display_name += f" @ {base_name}"
+        
+        # Get consistent CRS from handler or default to RD New
+        crs_def = self.handler.get_crs()
+        if not crs_def:
+            crs_def = "EPSG:28992"
+        qgs_crs = QgsCoordinateReferenceSystem(crs_def)
 
         # Check for existing managed layer (only if not forcing a new one)
         existing_layer = None
@@ -434,47 +440,64 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             timestamp = int(time.time() * 1000)
             temp_path = os.path.join(tempfile.gettempdir(), f"nlmod_mesh_{id(self)}_{timestamp}.nc")
             
-            QgsMessageLog.logMessage(f"NLMOD: Exporting mesh to {temp_path}", "NlmodInspector", Qgis.Info)
             success, msg = self.handler.export_to_mesh(var_name, layer_idx, time_idx, temp_path)
             
             if not success:
                 QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export mesh: {msg}")
                 return
 
+            # Capture existing style if we want to preserve it
+            preserved_mesh_style = None
+            if existing_layer and not self.auto_update_color:
+                try:
+                    old_settings = existing_layer.rendererSettings()
+                    idx = old_settings.activeScalarDatasetGroup()
+                    if idx >= 0:
+                        preserved_mesh_style = old_settings.scalarSettings(idx)
+                except Exception as e:
+                    pass  # If capture fails, we'll just use default styling
+
             # Calculate actual min/max for the current selection
             stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
             v_min, v_max = stats['min'], stats['max']
             
             if existing_layer:
-                # Store old path for cleanup attempt
-                old_path = existing_layer.source()
+                # For mesh layers, it's more reliable to remove and recreate than to update
+                # This avoids issues with cached group states
+                QgsProject.instance().removeMapLayer(existing_layer)
+                existing_layer = None
+                self.active_map_layer = None
+            
+            # Always create a fresh layer for mesh
+            layer = QgsMeshLayer(temp_path, display_name, "mdal")
+            if layer.isValid():
+                layer.setCrs(qgs_crs)
                 
-                # Update source to the new unique file
-                existing_layer.setDataSource(temp_path, display_name, "mdal")
-                existing_layer.reload()
-                existing_layer.setName(display_name)
-                # Only update style if auto-update-color is enabled
+                # Force group 0 active before styling
+                settings = layer.rendererSettings()
+                settings.setActiveScalarDatasetGroup(0)
+                settings.setActiveVectorDatasetGroup(0)
+                layer.setRendererSettings(settings)
+                
+                # Apply styling based on mode
                 if self.auto_update_color:
-                    self.style_mesh_layer(existing_layer, min_val=v_min, max_val=v_max)
-                existing_layer.triggerRepaint()
-                
-                # Try to clean up the old file (might still be locked, so we ignore errors)
-                if old_path and os.path.exists(old_path) and "nlmod_mesh_" in old_path:
-                    try:
-                        os.remove(old_path)
-                    except:
-                        pass
-            else:
-                layer = QgsMeshLayer(temp_path, display_name, "mdal")
-                if layer.isValid():
-                    if not layer.crs().isValid():
-                        layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
-                    self.style_mesh_layer(layer, min_val=v_min, max_val=v_max)
-                    QgsProject.instance().addMapLayer(layer)
-                    self.active_map_layer = layer
-                    self.active_var_name = var_name
+                    # Auto-update enabled: apply fresh styling with new min/max
+                    self.style_mesh_layer(layer, min_val=v_min, max_val=v_max, idx=0)
+                elif preserved_mesh_style:
+                    # Auto-update disabled and we have preserved style: use it
+                    settings = layer.rendererSettings()
+                    settings.setScalarSettings(0, preserved_mesh_style)
+                    layer.setRendererSettings(settings)
                 else:
-                    QtWidgets.QMessageBox.warning(self, "Error", "Failed to load the exported mesh file in QGIS.")
+                    # No auto-update and no preserved style: apply default styling
+                    self.style_mesh_layer(layer, min_val=v_min, max_val=v_max, idx=0)
+                
+                QgsProject.instance().addMapLayer(layer)
+                self.active_map_layer = layer
+                self.active_var_name = var_name
+            else:
+                QtWidgets.QMessageBox.warning(self, "Error", "Failed to load the exported mesh file in QGIS.")
+
 
         elif grid_type == "structured":
             QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NlmodInspector", Qgis.Info)
@@ -557,6 +580,15 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             except Exception as e:
                 QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NlmodInspector", Qgis.Warning)
 
+            # Capture existing style if we want to preserve it
+            preserved_raster_renderer = None
+            if existing_layer and not self.auto_update_color:
+                try:
+                    preserved_raster_renderer = existing_layer.renderer().clone()
+                    QgsMessageLog.logMessage("NLMOD: Preserving raster renderer", "NlmodInspector", Qgis.Info)
+                except Exception as e:
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to capture style: {e}", "NlmodInspector", Qgis.Warning)
+
             # Calculate actual min/max for the current selection
             stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
             v_min, v_max = stats['min'], stats['max']
@@ -566,8 +598,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 existing_layer.setDataSource(uri, display_name, "gdal")
                 existing_layer.reload()
                 existing_layer.setName(display_name)
+                
                 if self.auto_update_color:
                     self.apply_raster_style(existing_layer, band_idx=1, min_val=v_min, max_val=v_max)
+                elif preserved_raster_renderer:
+                    existing_layer.setRenderer(preserved_raster_renderer)
+                    QgsMessageLog.logMessage("NLMOD: Restored preserved raster style", "NlmodInspector", Qgis.Info)
+                
+                # Re-apply CRS to prevent "invalid projection" warning after setDataSource
+                if not existing_layer.crs().isValid() or existing_layer.crs() != qgs_crs:
+                    existing_layer.setCrs(qgs_crs)
+
                 existing_layer.triggerRepaint()
                 
                 # Cleanup old vsimem VRT
@@ -582,8 +623,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             else:
                 layer = QgsRasterLayer(uri, display_name)
                 if layer.isValid():
-                    if not layer.crs().isValid():
-                        layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+                    layer.setCrs(qgs_crs)
                     self.apply_raster_style(layer, band_idx=1, min_val=v_min, max_val=v_max)
                     QgsProject.instance().addMapLayer(layer)
                     self.active_map_layer = layer
@@ -663,7 +703,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QgsMessageLog.logMessage(f"NLMOD: Raster styling failed: {e}", "NlmodInspector", Qgis.Warning)
 
-    def style_mesh_layer(self, layer, min_val=None, max_val=None):
+    def style_mesh_layer(self, layer, min_val=None, max_val=None, idx=None):
         """Applies the Turbo colormap to a mesh layer's active scalar dataset."""
         try:
             # 1. Get Turbo Ramp
@@ -677,17 +717,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             from qgis.PyQt.QtGui import QColor
             from qgis.core import QgsMeshRendererScalarSettings
             ramp = get_ramp("Turbo", ["blue", "red"])
-            if not ramp: return
+            if not ramp:
+                return
 
-            # 2. Get active dataset group index
-            # Explicit cast to int is required for some PyQGIS versions to prevent type errors
-            idx = int(layer.rendererSettings().activeScalarDatasetGroup())
-            if idx < 0: 
-                # If nothing active, try finding one or default to 0
-                if layer.datasetGroupCount() > 0:
-                    idx = 0
-                else:
-                    return
+            # 2. Get dataset group index
+            if idx is None:
+                idx = int(layer.rendererSettings().activeScalarDatasetGroup())
+                if idx < 0: 
+                    if layer.datasetGroupCount() > 0:
+                        idx = 0
+                    else:
+                        return
             
             # 3. Get bounds for shader
             if min_val is None or max_val is None:
