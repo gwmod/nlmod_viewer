@@ -463,12 +463,25 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
             # Capture existing style if we want to preserve it
             preserved_mesh_style = None
-            if existing_layer and not self.auto_update_color:
+            preserved_native_mesh = None
+            preserved_edges = None
+            
+            if existing_layer:
                 try:
                     old_settings = existing_layer.rendererSettings()
-                    idx = old_settings.activeScalarDatasetGroup()
-                    if idx >= 0:
-                        preserved_mesh_style = old_settings.scalarSettings(idx)
+                    
+                    # Capture scalar style if auto-update is off
+                    if not self.auto_update_color:
+                        idx = old_settings.activeScalarDatasetGroup()
+                        if idx >= 0:
+                            preserved_mesh_style = old_settings.scalarSettings(idx)
+                    
+                    # Always capture mesh-level settings (wireframe, etc.)
+                    if hasattr(old_settings, 'nativeMeshSettings'):
+                        preserved_native_mesh = old_settings.nativeMeshSettings()
+                    if hasattr(old_settings, 'edgeSettings'):
+                        preserved_edges = old_settings.edgeSettings()
+                        
                 except Exception as e:
                     pass  # If capture fails, we'll just use default styling
 
@@ -523,6 +536,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 else:
                     # No auto-update and no preserved style: apply default styling
                     self.style_mesh_layer(layer, min_val=v_min, max_val=v_max, idx=0)
+                
+                # Apply preserved mesh-level settings (wireframe, etc.) if they exist
+                # This must happen AFTER style_mesh_layer to override its defaults
+                if preserved_native_mesh or preserved_edges:
+                    settings = layer.rendererSettings()
+                    if preserved_native_mesh:
+                        settings.setNativeMeshSettings(preserved_native_mesh)
+                    if preserved_edges:
+                        settings.setEdgeSettings(preserved_edges)
+                    layer.setRendererSettings(settings)
                 
                 QgsProject.instance().addMapLayer(layer, False)  # False = don't add to legend yet
                 
