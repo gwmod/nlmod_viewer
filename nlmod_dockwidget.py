@@ -433,6 +433,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             except RuntimeError:
                 # Layer was deleted from QGIS, so the C++ object is gone
                 self.active_map_layer = None
+        
+        # If we don't have a reference, try to find an existing layer by custom property
+        if not existing_layer and not force_new:
+            for layer_id, layer in QgsProject.instance().mapLayers().items():
+                if use_mesh and isinstance(layer, QgsMeshLayer):
+                    # Check if this layer was created by our plugin for this file
+                    if layer.customProperty("nlmod_inspector_source") == filepath:
+                        existing_layer = layer
+                        self.active_map_layer = layer
+                        break
+                elif not use_mesh and isinstance(layer, QgsRasterLayer):
+                    if layer.customProperty("nlmod_inspector_source") == filepath:
+                        existing_layer = layer
+                        self.active_map_layer = layer
+                        break
 
         if use_mesh:
             # Use a unique timestamped filename to avoid "Permission denied" locks from MDAL
@@ -464,9 +479,26 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if existing_layer:
                 # For mesh layers, it's more reliable to remove and recreate than to update
                 # This avoids issues with cached group states
+                
+                # Capture the layer's position in the layer tree before removing
+                layer_tree_root = QgsProject.instance().layerTreeRoot()
+                old_tree_layer = layer_tree_root.findLayer(existing_layer.id())
+                parent_group = None
+                insert_index = 0
+                
+                if old_tree_layer:
+                    parent_group = old_tree_layer.parent()
+                    if parent_group:
+                        # Get the index of this layer within its parent group
+                        insert_index = parent_group.children().index(old_tree_layer)
+                
                 QgsProject.instance().removeMapLayer(existing_layer)
                 existing_layer = None
                 self.active_map_layer = None
+            else:
+                # No existing layer, so no position to preserve
+                parent_group = None
+                insert_index = 0
             
             # Always create a fresh layer for mesh
             layer = QgsMeshLayer(temp_path, display_name, "mdal")
@@ -492,7 +524,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     # No auto-update and no preserved style: apply default styling
                     self.style_mesh_layer(layer, min_val=v_min, max_val=v_max, idx=0)
                 
-                QgsProject.instance().addMapLayer(layer)
+                QgsProject.instance().addMapLayer(layer, False)  # False = don't add to legend yet
+                
+                # Mark this layer as managed by our plugin
+                layer.setCustomProperty("nlmod_inspector_source", filepath)
+                layer.setCustomProperty("nlmod_inspector_managed", True)
+                
+                # Add to layer tree at the preserved position
+                layer_tree_root = QgsProject.instance().layerTreeRoot()
+                if parent_group:
+                    # Insert at the same position in the same group
+                    parent_group.insertLayer(insert_index, layer)
+                else:
+                    # Add to root at the preserved index (or top if no previous position)
+                    layer_tree_root.insertLayer(insert_index, layer)
+                
                 self.active_map_layer = layer
                 self.active_var_name = var_name
             else:
@@ -626,6 +672,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     layer.setCrs(qgs_crs)
                     self.apply_raster_style(layer, band_idx=1, min_val=v_min, max_val=v_max)
                     QgsProject.instance().addMapLayer(layer)
+                    
+                    # Mark this layer as managed by our plugin
+                    layer.setCustomProperty("nlmod_inspector_source", filepath)
+                    layer.setCustomProperty("nlmod_inspector_managed", True)
+                    
                     self.active_map_layer = layer
                     self.active_var_name = var_name
                 else:
