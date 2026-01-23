@@ -55,6 +55,41 @@ class VertexEditorDialog(QtWidgets.QDialog):
                 continue
         return pts
 
+class MainSettingsDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, auto_var=False, auto_layer=False, auto_time=False):
+        super().__init__(parent)
+        self.setWindowTitle("Global Settings")
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        group = QtWidgets.QGroupBox("Update map")
+        group_layout = QtWidgets.QVBoxLayout()
+        
+        self.chk_var = QtWidgets.QCheckBox("Update map when variable changes")
+        self.chk_var.setChecked(auto_var)
+        group_layout.addWidget(self.chk_var)
+        
+        self.chk_layer = QtWidgets.QCheckBox("Update map when layer changes")
+        self.chk_layer.setChecked(auto_layer)
+        group_layout.addWidget(self.chk_layer)
+        
+        self.chk_time = QtWidgets.QCheckBox("Update map when time changes")
+        self.chk_time.setChecked(auto_time)
+        group_layout.addWidget(self.chk_time)
+        
+        self.chk_color = QtWidgets.QCheckBox("Update color scale on every change")
+        self.chk_color.setChecked(getattr(parent, 'auto_update_color', True))
+        group_layout.addWidget(self.chk_color)
+        
+        group.setLayout(group_layout)
+        layout.addWidget(group)
+        
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal, self)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
 class NlmodDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None, iface=None):
         super(NlmodDockWidget, self).__init__(parent)
@@ -76,6 +111,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.browse_btn.clicked.connect(self.select_file)
         h_layout.addWidget(self.file_edit)
         h_layout.addWidget(self.browse_btn)
+        
+        self.settings_btn = QtWidgets.QPushButton("Settings...")
+        self.settings_btn.clicked.connect(self.show_settings)
+        h_layout.addWidget(self.settings_btn)
+        
         file_layout.addLayout(h_layout)
         
         # Metadata / Info Area
@@ -110,6 +150,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         layer_sel_layout.addWidget(QtWidgets.QLabel("Select Layer:"))
         self.layer_combo = QtWidgets.QComboBox()
         self.layer_combo.setEnabled(False)
+        self.layer_combo.currentIndexChanged.connect(self.on_layer_combo_changed)
         layer_sel_layout.addWidget(self.layer_combo)
         layer_group_layout.addLayout(layer_sel_layout)
 
@@ -132,7 +173,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Add to Map Button
         self.load_btn = QtWidgets.QPushButton("Add to Map")
-        self.load_btn.clicked.connect(self.add_layer)
+        self.load_btn.clicked.connect(lambda: self.add_layer(force_new=True))
         layer_group_layout.addWidget(self.load_btn)
         
         layout.addWidget(layer_group, 1)
@@ -172,12 +213,20 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Logic State
         self.handler = None
         self.time_values = []
+        self.active_map_layer = None # Track the managed map layer
+        self.active_var_name = None  # Track the name of the currently loaded variable
         self.plot_windows = {}  # Dictionary to track cross-section plot windows
         self.cs_geometries = {}  # Dictionary to store cross-section line geometries
         self.cs_rubber_bands = {}  # Dictionary to store QgsRubberBand for each CS
         self.active_cs_id = None  # Track which CS is currently being edited/drawn
         self.prev_map_tool = None # Store map tool before activation
         self.sync_marker = None   # Marker for plot synchronization
+        
+        # Auto-update settings
+        self.auto_update_var = False
+        self.auto_update_layer = False
+        self.auto_update_time = False
+        self.auto_update_color = True
         
         self.is_restoring = True  # Start in restoring mode to prevent overwrites
         # Signal connection moved to end of restore_state_from_project
@@ -259,7 +308,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         if not selected_items:
             self.layer_combo.setEnabled(False)
-            self.time_combo.setEnabled(False)
+            self.time_slider.setEnabled(False)
             return
             
         item = selected_items[0]
@@ -268,6 +317,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         self.layer_combo.setEnabled(has_layers)
         self.time_slider.setEnabled(has_times)
+
+        if self.auto_update_var:
+            self.add_layer()
 
     def get_vars_3d(self):
         """Helper to identify variables that have a layer/vertical dimension."""
@@ -330,13 +382,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Could not fetch info: {e}")
 
-    def add_layer(self):
+    def add_layer(self, force_new=False):
         if not self.handler:
             return
             
         selected_items = self.var_list.selectedItems()
         if not selected_items:
-            QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
+            if not getattr(self, 'auto_update_var', False):
+                QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
             return
             
         var_name = selected_items[0].data(QtCore.Qt.UserRole)
@@ -348,51 +401,80 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Structured grids always load as Raster (GDAL)
         use_mesh = (grid_type == "vertex")
         
+        # Determine Layer name for legend
+        layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
+        layer_val = self.layer_combo.currentText() if self.layer_combo.isEnabled() else "1"
+        time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
+        time_val = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
+        
+        display_name = f"{var_name}"
+        if self.layer_combo.isEnabled(): display_name += f" ({layer_val})"
+        if time_val: display_name += f" [{time_val}]"
+        display_name += f" @ {base_name}"
+
+        # Check for existing managed layer (only if not forcing a new one)
+        existing_layer = None
+        if not force_new and self.active_map_layer:
+            try:
+                # Check if layer still exists in the project
+                if self.active_map_layer.id() in QgsProject.instance().mapLayers():
+                    # If the type matches, we can update it
+                    is_mesh = isinstance(self.active_map_layer, QgsMeshLayer)
+                    if is_mesh == use_mesh:
+                        existing_layer = self.active_map_layer
+                else:
+                    self.active_map_layer = None
+            except RuntimeError:
+                # Layer was deleted from QGIS, so the C++ object is gone
+                self.active_map_layer = None
+
         if use_mesh:
-            
-            # For vertex grids, export to a dedicated clean UGRID file
-            # This solves MDAL's identification issues with complex multi-var files
-            layer_val = "1"
-            layer_idx = 0
-            if self.layer_combo.isEnabled():
-                layer_val = self.layer_combo.currentText()
-                layer_idx = self.layer_combo.currentIndex()
-            
-            time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
-            time_val = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
-            
-            # Create a descriptive temp filename
-            temp_dir = tempfile.gettempdir()
-            clean_var = "".join(x for x in var_name if x.isalnum())
-            clean_l_val = "".join(x for x in layer_val if x.isalnum())
-            clean_t_val = "".join(x for x in time_val if x.isalnum())
-            temp_path = os.path.join(temp_dir, f"nlmod_{clean_var}_{clean_l_val}_{clean_t_val}.nc")
+            # Use a unique timestamped filename to avoid "Permission denied" locks from MDAL
+            import time
+            timestamp = int(time.time() * 1000)
+            temp_path = os.path.join(tempfile.gettempdir(), f"nlmod_mesh_{id(self)}_{timestamp}.nc")
             
             QgsMessageLog.logMessage(f"NLMOD: Exporting mesh to {temp_path}", "NlmodInspector", Qgis.Info)
-            
             success, msg = self.handler.export_to_mesh(var_name, layer_idx, time_idx, temp_path)
             
             if not success:
                 QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export mesh: {msg}")
                 return
+
+            # Calculate actual min/max for the current selection
+            stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
+            v_min, v_max = stats['min'], stats['max']
             
-            layer_name = f"{base_name} - {var_name}"
-            if self.layer_combo.isEnabled():
-                layer_name += f" ({layer_val})"
-            if time_val: layer_name += f" [{time_val}]"
-            layer = QgsMeshLayer(temp_path, layer_name, "mdal")
-            
-            if layer.isValid():
-                if not layer.crs().isValid():
-                    layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+            if existing_layer:
+                # Store old path for cleanup attempt
+                old_path = existing_layer.source()
                 
-                # Apply Turbo styling for Mesh
-                self.style_mesh_layer(layer)
+                # Update source to the new unique file
+                existing_layer.setDataSource(temp_path, display_name, "mdal")
+                existing_layer.reload()
+                existing_layer.setName(display_name)
+                # Only update style if auto-update-color is enabled
+                if self.auto_update_color:
+                    self.style_mesh_layer(existing_layer, min_val=v_min, max_val=v_max)
+                existing_layer.triggerRepaint()
                 
-                QgsProject.instance().addMapLayer(layer)
-                QgsMessageLog.logMessage(f"NLMOD: Successfully loaded mesh layer for {var_name}", "NlmodInspector", Qgis.Info)
+                # Try to clean up the old file (might still be locked, so we ignore errors)
+                if old_path and os.path.exists(old_path) and "nlmod_mesh_" in old_path:
+                    try:
+                        os.remove(old_path)
+                    except:
+                        pass
             else:
-                QtWidgets.QMessageBox.warning(self, "Error", "Failed to load the exported mesh file in QGIS.")
+                layer = QgsMeshLayer(temp_path, display_name, "mdal")
+                if layer.isValid():
+                    if not layer.crs().isValid():
+                        layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+                    self.style_mesh_layer(layer, min_val=v_min, max_val=v_max)
+                    QgsProject.instance().addMapLayer(layer)
+                    self.active_map_layer = layer
+                    self.active_var_name = var_name
+                else:
+                    QtWidgets.QMessageBox.warning(self, "Error", "Failed to load the exported mesh file in QGIS.")
 
         elif grid_type == "structured":
             QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NlmodInspector", Qgis.Info)
@@ -415,14 +497,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # GDAL flattens NetCDF dimensions: band_idx = time_idx * n_layers + layer_idx + 1
             band_idx = (time_idx * n_layers) + layer_idx + 1
             
-            val_str = self.layer_combo.currentText() if self.layer_combo.isEnabled() else ""
-            time_str = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
-            
-            layer_name = var_name
-            if val_str: layer_name += f" ({val_str})"
-            if time_str: layer_name += f" [{time_str}]"
-            layer_name += f" @ {base_name}"
-            
+            safe_path = filepath.replace('\\', '/')
+            uri = f'NETCDF:"{safe_path}":{var_name}'
+            # (Note: display_name is already calculated above)
+
             # --- VRT Workaround for Coordinates & Rotation ---
             try:
                 geotransform = self.handler.get_geotransform(var_name)
@@ -455,7 +533,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             vrt_ds = None # Close
                             
                             # Handle Ascending Y if necessary
-                            # (Same logic as before, but ensure it works with rotated matrices)
                             y_is_ascending = extent[4]
                             if y_is_ascending:
                                 var_info = self.handler.ds.variables[var_name]
@@ -470,89 +547,47 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     else:
                         raise Exception("Could not open subdataset")
 
-                    # Save to vsimem
-                    vrt_mem_path = f"/vsimem/{var_name}_{band_idx}_{id(self)}.vrt"
+                    # Save to unique vsimem path to bypass GDAL/QGIS caching
+                    import time
+                    ts = int(time.time() * 1000)
+                    vrt_mem_path = f"/vsimem/nlmod_raster_{id(self)}_{ts}.vrt"
                     gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
                     uri = vrt_mem_path
-                    QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri} (angrot={self.handler.angrot})", "NlmodInspector", Qgis.Info)
-                else:
-                     QgsMessageLog.logMessage(f"NLMOD: Could not calculate placement for {var_name}", "NlmodInspector", Qgis.Warning)
-
+                    QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri}", "NlmodInspector", Qgis.Info)
             except Exception as e:
-                import traceback
-                tb = traceback.format_exc()
-                QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}\n{tb}", "NlmodInspector", Qgis.Warning)
-            # ------------------------------------
+                QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NlmodInspector", Qgis.Warning)
 
-            layer = QgsRasterLayer(uri, layer_name)
-            if layer.isValid():
-                if not layer.crs().isValid():
-                    layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+            # Calculate actual min/max for the current selection
+            stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
+            v_min, v_max = stats['min'], stats['max']
+
+            if existing_layer:
+                old_uri = existing_layer.source()
+                existing_layer.setDataSource(uri, display_name, "gdal")
+                existing_layer.reload()
+                existing_layer.setName(display_name)
+                if self.auto_update_color:
+                    self.apply_raster_style(existing_layer, band_idx=1, min_val=v_min, max_val=v_max)
+                existing_layer.triggerRepaint()
                 
-                # Band index is always 1 for VRT (VRT exposes selected source band as band 1)
-                band_idx = 1
-
-                # Apply Pseudocolor Renderer (Turbo)
-                try:
-                    # Robust Color Ramp Getter
-                    def get_ramp(name, default_colors):
-                        style = QgsStyle.defaultStyle()
-                        ramp = style.colorRamp(name)
-                        if not ramp:
-                            # Create a simple gradient if not found
-                            from qgis.PyQt.QtGui import QColor
-                            return QgsGradientColorRamp(QColor(default_colors[0]), QColor(default_colors[1]))
-                        return ramp
-
-                    # Try Turbo -> Viridis -> Spectral -> Blue-Red
-                    ramp = get_ramp("Turbo", ["blue", "red"])
-                    if not ramp:
-                         # Very safe fallback
-                         style = QgsStyle.defaultStyle()
-                         ramp = style.colorRamp("Spectral")
-
-                    if ramp:
-                        # Statistics - use approximate for speed/safety
-                        stats = layer.dataProvider().bandStatistics(band_idx, QgsRasterBandStats.Min | QgsRasterBandStats.Max, layer.extent(), 0)
-                        min_val = stats.minimumValue
-                        max_val = stats.maximumValue
-                        
-                        # Handle flat data (min == max)
-                        if min_val >= max_val:
-                            min_val = min_val - 1.0
-                            max_val = max_val + 1.0
-
-                        # Create shader with automatic classification
-                        fcn = QgsColorRampShader(min_val, max_val)
-                        fcn.setColorRampType(QgsColorRampShader.Interpolated)
-                        fcn.setSourceColorRamp(ramp)
-                        fcn.classifyColorRamp(classes=10, band=band_idx, input=layer.dataProvider())
-                        
-                        shader = QgsRasterShader()
-                        shader.setRasterShaderFunction(fcn)
-                        
-                        renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), band_idx, shader)
-                        layer.setRenderer(renderer)
-                        layer.triggerRepaint()
-                    else:
-                        print("Could not find any color ramp.")
-                        QtWidgets.QMessageBox.warning(self, "Style Error", "Could not find 'Turbo' or fallback color ramp.")
-                except Exception as e:
-                    import traceback
-                    tb = traceback.format_exc()
-                    print(f"Error setting style: {e}")
-                    QtWidgets.QMessageBox.critical(self, "Style Error", f"Failed to set pseudocolor renderer:\n{str(e)}\n\n{tb}")
-
-                QgsProject.instance().addMapLayer(layer)
+                # Cleanup old vsimem VRT
+                if "/vsimem/nlmod_raster_" in old_uri:
+                    try:
+                        from osgeo import gdal
+                        gdal.Unlink(old_uri)
+                    except:
+                        pass
+                
+                self.active_var_name = var_name
             else:
-                # Fallback
-                layer = QgsMeshLayer(filepath, f"{base_name} (Mesh)", "mdal")
+                layer = QgsRasterLayer(uri, display_name)
                 if layer.isValid():
                     if not layer.crs().isValid():
                         layer.setCrs(QgsCoordinateReferenceSystem("EPSG:28992"))
+                    self.apply_raster_style(layer, band_idx=1, min_val=v_min, max_val=v_max)
                     QgsProject.instance().addMapLayer(layer)
-                    self.activate_mesh_dataset(layer, var_name)
-                    self.style_mesh_layer(layer)
+                    self.active_map_layer = layer
+                    self.active_var_name = var_name
                 else:
                     QtWidgets.QMessageBox.warning(self, "Error", f"Failed to load variable '{var_name}'.")
         else:
@@ -569,7 +604,66 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.warning(self, "Error", "Could not load file.")
 
 
-    def style_mesh_layer(self, layer):
+    def apply_raster_style(self, layer, band_idx=1, min_val=None, max_val=None):
+        """Helper to apply Turbo colormap to raster layers."""
+        try:
+            def get_ramp(name, default_colors):
+                style = QgsStyle.defaultStyle()
+                ramp = style.colorRamp(name)
+                if not ramp:
+                    from qgis.PyQt.QtGui import QColor
+                    return QgsGradientColorRamp(QColor(default_colors[0]), QColor(default_colors[1]))
+                return ramp
+
+            ramp = get_ramp("Turbo", ["blue", "red"])
+            if not ramp:
+                 style = QgsStyle.defaultStyle()
+                 ramp = style.colorRamp("Spectral")
+
+            if ramp:
+                # If values weren't passed, try to get them from the provider
+                if min_val is None or max_val is None:
+                    # Statistics
+                    stats = layer.dataProvider().bandStatistics(band_idx, QgsRasterBandStats.Min | QgsRasterBandStats.Max, layer.extent(), 0)
+                    min_val, max_val = stats.minimumValue, stats.maximumValue
+                
+                # Robustly handle NaN/Inf and Constant values
+                import math
+                if math.isnan(min_val) or math.isinf(min_val): min_val = 0.0
+                if math.isnan(max_val) or math.isinf(max_val): max_val = 1.0
+                
+                if min_val >= max_val:
+                    # Constant value or single pixel - use wider buffer for stability
+                    min_val = min_val - 1.0
+                    max_val = max_val + 1.0
+
+                fcn = QgsColorRampShader(min_val, max_val)
+                fcn.setColorRampType(QgsColorRampShader.Interpolated)
+                fcn.setSourceColorRamp(ramp)
+                
+                # Manual item generation ensures we use our sanitized min/max 
+                # instead of potentially stale provider metrics
+                items = []
+                steps = 10
+                for i in range(steps):
+                    v = min_val + (max_val - min_val) * i / (steps - 1)
+                    color = ramp.color(i / (steps - 1))
+                    items.append(QgsColorRampShader.ColorRampItem(v, color, f"{v:.4g}"))
+                fcn.setColorRampItemList(items)
+                
+                shader = QgsRasterShader()
+                shader.setRasterShaderFunction(fcn)
+                renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), band_idx, shader)
+                layer.setRenderer(renderer)
+                layer.triggerRepaint()
+                
+                # Force canvas refresh to be absolutely sure
+                if self.iface:
+                    self.iface.mapCanvas().refresh()
+        except Exception as e:
+            QgsMessageLog.logMessage(f"NLMOD: Raster styling failed: {e}", "NlmodInspector", Qgis.Warning)
+
+    def style_mesh_layer(self, layer, min_val=None, max_val=None):
         """Applies the Turbo colormap to a mesh layer's active scalar dataset."""
         try:
             # 1. Get Turbo Ramp
@@ -596,30 +690,39 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     return
             
             # 3. Get bounds for shader
-            # Using dataProvider is often more robust for metadata in PyQGIS
-            provider = layer.dataProvider()
-            if provider:
-                meta = provider.datasetGroupMetadata(idx)
-            else:
-                meta = layer.datasetGroupMetadata(idx)
-            
-            # Robustly try to get min/max from metadata (method names vary by QGIS version)
-            min_val = 0.0
-            max_val = 1.0
-            
-            if hasattr(meta, 'minimumValue'):
-                min_val = meta.minimumValue()
-                max_val = meta.maximumValue()
-            elif hasattr(meta, 'statistic'):
-                # 0 = Minimum, 1 = Maximum
-                try:
-                    min_val = meta.statistic(0)
-                    max_val = meta.statistic(1)
-                except:
-                    pass
-            elif hasattr(meta, 'minimum'):
-                min_val = meta.minimum()
-                max_val = meta.maximum()
+            if min_val is None or max_val is None:
+                # Using dataProvider is often more robust for metadata in PyQGIS
+                provider = layer.dataProvider()
+                if provider:
+                    meta = provider.datasetGroupMetadata(idx)
+                else:
+                    meta = layer.datasetGroupMetadata(idx)
+                
+                # Robustly try to get min/max from metadata
+                min_val = None
+                max_val = None
+                
+                if hasattr(meta, 'minimumValue'):
+                    min_val = meta.minimumValue()
+                    max_val = meta.maximumValue()
+                elif hasattr(meta, 'statistic'):
+                    try:
+                        min_val = meta.statistic(0)
+                        max_val = meta.statistic(1)
+                    except:
+                        pass
+                elif hasattr(meta, 'minimum'):
+                    min_val = meta.minimum()
+                    max_val = meta.maximum()
+                
+                # Use dataProvider as secondary source for min/max
+                if (min_val is None or max_val is None) and provider:
+                    stats = provider.datasetGroupMetadata(idx) # Re-fetch metadata
+
+                # Sanitize values
+                import math
+                if min_val is None or math.isnan(min_val) or math.isinf(min_val): min_val = 0.0
+                if max_val is None or math.isnan(max_val) or math.isinf(max_val): max_val = 1.0
             
             if min_val >= max_val:
                 min_val -= 1.0
@@ -679,6 +782,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
             layer.setRendererSettings(settings)
             layer.triggerRepaint()
+            
+            # Force canvas refresh
+            if self.iface:
+                self.iface.mapCanvas().refresh()
 
         except Exception as e:
             QgsMessageLog.logMessage(f"NLMOD: Mesh styling failed: {e}", "NlmodInspector", Qgis.Warning)
@@ -1293,6 +1400,26 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # as adding a layer is an explicit "Add to Map" action.
             # But the state is stored for the next "Add to Map" or for cross-sections.
             self.save_state_to_project()
+            
+            if self.auto_update_time:
+                self.add_layer()
+
+    def on_layer_combo_changed(self, index):
+        if self.auto_update_layer and not self.is_restoring:
+            self.add_layer()
+            self.save_state_to_project()
+
+    def show_settings(self):
+        dlg = MainSettingsDialog(self, 
+                                 auto_var=self.auto_update_var,
+                                 auto_layer=self.auto_update_layer,
+                                 auto_time=self.auto_update_time)
+        if dlg.exec_():
+            self.auto_update_var = dlg.chk_var.isChecked()
+            self.auto_update_layer = dlg.chk_layer.isChecked()
+            self.auto_update_time = dlg.chk_time.isChecked()
+            self.auto_update_color = dlg.chk_color.isChecked()
+            self.save_state_to_project()
 
     def get_next_cs_label(self):
         """Finds the next label based on Max(existing_labels) + 1."""
@@ -1326,6 +1453,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Save current selections
         if self.time_slider.isEnabled():
             QgsProject.instance().writeEntry("NlmodInspector", "global_time_idx", str(self.time_slider.value()))
+
+        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_var", "true" if self.auto_update_var else "false")
+        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_layer", "true" if self.auto_update_layer else "false")
+        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_time", "true" if self.auto_update_time else "false")
+        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_color", "true" if self.auto_update_color else "false")
         
         cs_list = []
         for item_id, points in self.cs_geometries.items():
@@ -1382,6 +1514,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             self.time_slider.setValue(time_idx)
                     except:
                         pass
+                
+                # Restore auto-update settings
+                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_var", "false")
+                self.auto_update_var = (v == "true")
+                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_layer", "false")
+                self.auto_update_layer = (v == "true")
+                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_time", "false")
+                self.auto_update_time = (v == "true")
+                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_color", "true")
+                self.auto_update_color = (v == "true")
                 
                 cs_json, _ = QgsProject.instance().readEntry("NlmodInspector", "cross_sections", "[]")
                 QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NlmodInspector", Qgis.Info)

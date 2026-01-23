@@ -1070,3 +1070,39 @@ class NetcdfHandler:
         except Exception as e:
             import traceback
             return False, f"Export failed: {str(e)}\n{traceback.format_exc()}"
+
+    def get_variable_stats(self, var_name, layer_idx=0, time_idx=0):
+        """Returns the min and max values for a specific variable slice."""
+        if not self.ds or var_name not in self.ds.variables:
+            return {"min": 0.0, "max": 1.0}
+        
+        try:
+            import numpy as np
+            var = self.ds.variables[var_name]
+            dims = var.dimensions
+            sl = [slice(None)] * var.ndim
+            
+            # Identify dimensions
+            possible_layers = {'layer', 'z', 'level', 'lev'}
+            possible_times = {'time'}
+            
+            for i, d in enumerate(dims):
+                if d.lower() in possible_layers:
+                    sl[i] = layer_idx
+                elif d.lower() in possible_times:
+                    sl[i] = time_idx
+            
+            data = var[tuple(sl)]
+            
+            # Compute stats on the actual slice
+            v_min = float(np.nanmin(data))
+            v_max = float(np.nanmax(data))
+            
+            # Handle all-NaN or constant data
+            import math
+            if math.isnan(v_min) or math.isinf(v_min): v_min = 0.0
+            if math.isnan(v_max) or math.isinf(v_max): v_max = 1.0
+            
+            return {"min": v_min, "max": v_max}
+        except:
+            return {"min": 0.0, "max": 1.0}
