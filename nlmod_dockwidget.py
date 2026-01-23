@@ -116,9 +116,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Time Selection
         time_sel_layout = QtWidgets.QHBoxLayout()
         time_sel_layout.addWidget(QtWidgets.QLabel("Select Time:"))
-        self.time_combo = QtWidgets.QComboBox()
-        self.time_combo.setEnabled(False)
-        time_sel_layout.addWidget(self.time_combo)
+        
+        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.time_slider.setEnabled(False)
+        self.time_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.time_slider.setTickInterval(1)
+        self.time_slider.valueChanged.connect(self.on_time_slider_changed)
+        time_sel_layout.addWidget(self.time_slider)
+        
+        self.time_label = QtWidgets.QLabel("")
+        self.time_label.setMinimumWidth(100)
+        time_sel_layout.addWidget(self.time_label)
+        
         layer_group_layout.addLayout(time_sel_layout)
         
         # Add to Map Button
@@ -162,6 +171,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Logic State
         self.handler = None
+        self.time_values = []
         self.plot_windows = {}  # Dictionary to track cross-section plot windows
         self.cs_geometries = {}  # Dictionary to store cross-section line geometries
         self.cs_rubber_bands = {}  # Dictionary to store QgsRubberBand for each CS
@@ -204,11 +214,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.layer_combo.addItems(dim_meta["layers"])
         self.layer_combo.blockSignals(False)
         
-        self.time_combo.blockSignals(True)
-        self.time_combo.clear()
-        if dim_meta["times"]:
-            self.time_combo.addItems(dim_meta["times"])
-        self.time_combo.blockSignals(False)
+        self.time_values = dim_meta["times"]
+        self.time_slider.blockSignals(True)
+        self.time_slider.setMinimum(0)
+        self.time_slider.setMaximum(max(0, len(self.time_values) - 1))
+        self.time_slider.setValue(0)
+        if self.time_values:
+            self.time_label.setText(self.time_values[0])
+        else:
+            self.time_label.setText("")
+        self.time_slider.blockSignals(False)
             
         self.populate_vars()
         
@@ -252,7 +267,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         has_times = item.data(QtCore.Qt.UserRole + 2)
         
         self.layer_combo.setEnabled(has_layers)
-        self.time_combo.setEnabled(has_times)
+        self.time_slider.setEnabled(has_times)
 
     def get_vars_3d(self):
         """Helper to identify variables that have a layer/vertical dimension."""
@@ -343,8 +358,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 layer_val = self.layer_combo.currentText()
                 layer_idx = self.layer_combo.currentIndex()
             
-            time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
-            time_val = self.time_combo.currentText() if self.time_combo.isEnabled() else ""
+            time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
+            time_val = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
             
             # Create a descriptive temp filename
             temp_dir = tempfile.gettempdir()
@@ -391,7 +406,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             band_idx = 1
             
             layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
-            time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
+            time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
             
             # Use global count if the variable has layers, else 1
             n_layers = self.layer_combo.count() if self.layer_combo.isEnabled() else 1
@@ -401,7 +416,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             band_idx = (time_idx * n_layers) + layer_idx + 1
             
             val_str = self.layer_combo.currentText() if self.layer_combo.isEnabled() else ""
-            time_str = self.time_combo.currentText() if self.time_combo.isEnabled() else ""
+            time_str = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
             
             layer_name = var_name
             if val_str: layer_name += f" ({val_str})"
@@ -761,7 +776,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return None
             
         if time_idx is None:
-            time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
+            time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
             
         # Transform points to Model CRS
         try:
@@ -794,7 +809,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         all_vars = self.get_all_vars()
 
         # 1.5 Get current time info
-        time_idx = time_idx if time_idx is not None else (self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0)
+        time_idx = time_idx if time_idx is not None else (self.time_slider.value() if self.time_slider.isEnabled() else 0)
         time_values = self.handler.get_dimensions_metadata()["times"]
 
         # 2. Extract Data
@@ -1270,6 +1285,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def on_cs_cursor_left(self):
         if self.sync_marker:
             self.sync_marker.hide()
+            
+    def on_time_slider_changed(self, value):
+        if self.time_values and 0 <= value < len(self.time_values):
+            self.time_label.setText(self.time_values[value])
+            # Note: We don't automatically update map layers here, 
+            # as adding a layer is an explicit "Add to Map" action.
+            # But the state is stored for the next "Add to Map" or for cross-sections.
+            self.save_state_to_project()
 
     def get_next_cs_label(self):
         """Finds the next label based on Max(existing_labels) + 1."""
@@ -1301,8 +1324,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         QgsProject.instance().writeEntry("NlmodInspector", "is_open", is_open)
         
         # Save current selections
-        if self.time_combo.isEnabled():
-            QgsProject.instance().writeEntry("NlmodInspector", "global_time_idx", str(self.time_combo.currentIndex()))
+        if self.time_slider.isEnabled():
+            QgsProject.instance().writeEntry("NlmodInspector", "global_time_idx", str(self.time_slider.value()))
         
         cs_list = []
         for item_id, points in self.cs_geometries.items():
@@ -1352,11 +1375,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 
                 # Restore time selection
                 time_str, ok = QgsProject.instance().readEntry("NlmodInspector", "global_time_idx", "0")
-                if ok and self.time_combo.isEnabled():
+                if ok and self.time_slider.isEnabled():
                     try:
                         time_idx = int(time_str)
-                        if time_idx < self.time_combo.count():
-                            self.time_combo.setCurrentIndex(time_idx)
+                        if time_idx <= self.time_slider.maximum():
+                            self.time_slider.setValue(time_idx)
                     except:
                         pass
                 
