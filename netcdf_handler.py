@@ -909,6 +909,13 @@ class NetcdfHandler:
                 var_desc = getattr(v_obj, 'long_name', getattr(v_obj, 'description', variable_name))
                 var_units = getattr(v_obj, 'units', "")
 
+            # 7. Check if variable has time dimension
+            has_time = False
+            if variable_name in self.ds.variables:
+                v_obj = self.ds.variables[variable_name]
+                if any(d in {'time'} for d in v_obj.dimensions):
+                    has_time = True
+
             return {
                 "distances": final_dists,
                 "top": top,
@@ -920,7 +927,8 @@ class NetcdfHandler:
                 "layer_names": layer_names,
                 "num_layers": botm.shape[0],
                 "description": var_desc,
-                "units": var_units
+                "units": var_units,
+                "has_time": has_time
             }
 
         except Exception as e:

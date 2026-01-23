@@ -215,8 +215,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Update existing cross-sections with new data/variables
         vars_3d = self.get_vars_3d()
         all_vars = self.get_all_vars()
+        times = dim_meta["times"]
         for win in self.plot_windows.values():
-            win.refresh(vars_3d, head_vars=all_vars)
+            win.refresh(vars_3d, head_vars=all_vars, time_values=times)
             
         self.save_state_to_project()
 
@@ -754,12 +755,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Tool Error", f"Failed to start tool: {e}")
 
-    def fetch_cross_section_data(self, var_name, points):
+    def fetch_cross_section_data(self, var_name, points, time_idx=None):
         """Callback for CrossSectionPlotWindow to fetch data."""
         if not self.handler:
             return None
             
-        time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
+        if time_idx is None:
+            time_idx = self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0
             
         # Transform points to Model CRS
         try:
@@ -777,9 +779,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         return self.handler.get_cross_section_data(var_name, points, time_idx=time_idx)
 
     def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
-                               z_range=None, v_range=None, visible=True,
+                               z_range=None, x_range=None, v_range=None, visible=True,
                                show_layers=True, show_cells=False, show_layer_names=True, use_log=False,
-                               cmap_name='Turbo', invert_cmap=False):
+                               cmap_name='Turbo', invert_cmap=False, time_idx=None):
         """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
             return
@@ -791,9 +793,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         all_vars = self.get_all_vars()
 
+        # 1.5 Get current time info
+        time_idx = time_idx if time_idx is not None else (self.time_combo.currentIndex() if self.time_combo.isEnabled() else 0)
+        time_values = self.handler.get_dimensions_metadata()["times"]
+
         # 2. Extract Data
         try:
-            data = self.fetch_cross_section_data(var_name, points)
+            data = self.fetch_cross_section_data(var_name, points, time_idx=time_idx)
             if not data:
                 return
             if "error" in data:
@@ -835,9 +841,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win = CrossSectionPlotWindow(
                 data, var_name, self, vertex_distances=v_dists,
                 item_id=item_id, all_vars=vars_3d, head_vars=all_vars, data_fetcher=self.fetch_cross_section_data,
-                label=cs_label, points=points, z_range=z_range, v_range=v_range,
+                label=cs_label, points=points, z_range=z_range, x_range=x_range, v_range=v_range,
                 show_layers=show_layers, show_cells=show_cells, show_layer_names=show_layer_names,
-                use_log=use_log, cmap_name=cmap_name, invert_cmap=invert_cmap
+                use_log=use_log, cmap_name=cmap_name, invert_cmap=invert_cmap,
+                time_values=time_values, time_idx=time_idx
             )
             win.variable_changed.connect(self.update_cs_list_label)
             win.cursor_moved.connect(self.on_cs_cursor_moved)
@@ -1301,7 +1308,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         for item_id, points in self.cs_geometries.items():
             win = self.plot_windows.get(item_id)
             if win:
-                # Ensure we use standard Python types for JSON serialization (NumPy types fail)
+                # Get current view ranges from the plot directly
+                view_range = win.plot_widget.getViewBox().viewRange() # [[xmin, xmax], [ymin, ymax]]
+                
                 v_min = float(win.v_min) if win.v_min is not None else None
                 v_max = float(win.v_max) if win.v_max is not None else None
                 
@@ -1310,8 +1319,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     'label': win.cs_label,
                     'variable': win.current_var,
                     'head_variable': win.current_head_var,
+                    'time_idx': win.current_time_idx,
                     'points': [(float(p.x()), float(p.y())) for p in points],
-                    'z_range': (float(win.z_min_spin.value()), float(win.z_max_spin.value())),
+                    'z_range': (float(view_range[1][0]), float(view_range[1][1])),
+                    'x_range': (float(view_range[0][0]), float(view_range[0][1])),
                     'v_range': (v_min, v_max),
                     'visible': win.isVisible(),
                     'show_layers': win.show_layer_boundaries,
@@ -1362,6 +1373,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             cs_label=cs['label'], 
                             item_id=cs['id'],
                             z_range=cs.get('z_range'),
+                            x_range=cs.get('x_range'),
                             v_range=cs.get('v_range'),
                             visible=cs.get('visible', True),
                             show_layers=cs.get('show_layers', True),
@@ -1369,7 +1381,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             show_layer_names=cs.get('show_layer_names', True),
                             use_log=cs.get('use_log', False),
                             cmap_name=cs.get('cmap', 'Turbo'),
-                            invert_cmap=cs.get('invert_cmap', False)
+                            invert_cmap=cs.get('invert_cmap', False),
+                            time_idx=cs.get('time_idx', 0)
                         )
                         # Set head variable if it was saved
                         if win and cs.get('head_variable'):

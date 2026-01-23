@@ -117,11 +117,12 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     settings_changed = QtCore.pyqtSignal()
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
                  item_id=None, all_vars=None, head_vars=None, data_fetcher=None, label="A", points=None,
-                 z_range=None, v_range=None, show_layers=True, show_cells=False, show_layer_names=False,
-                 use_log=False, cmap_name='Turbo', invert_cmap=False):
+                 z_range=None, x_range=None, v_range=None, show_layers=True, show_cells=False, show_layer_names=False,
+                 use_log=False, cmap_name='Turbo', invert_cmap=False, time_values=None, time_idx=0):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
         self.data_fetcher = data_fetcher
+        self.data = data
         self.all_vars = all_vars or [variable_name]
         self.head_vars = ["None"] + (head_vars or self.all_vars)
         self.current_var = variable_name
@@ -137,6 +138,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.invert_cmap = invert_cmap
         self.v_min = v_range[0] if v_range else None
         self.v_max = v_range[1] if v_range else None
+        self.time_values = time_values or []
+        self.current_time_idx = time_idx
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -170,23 +173,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         
         tools_layout.addSpacing(20)
         
-        tools_layout.addWidget(QtWidgets.QLabel("Z-Range (m):"))
-        
-        self.z_min_spin = QtWidgets.QDoubleSpinBox()
-        self.z_min_spin.setRange(-10000, 10000)
-        self.z_min_spin.setDecimals(1)
-        self.z_min_spin.valueChanged.connect(self.update_z_range)
-        self.z_min_spin.valueChanged.connect(self.range_changed.emit)
-        tools_layout.addWidget(self.z_min_spin)
-        
-        tools_layout.addWidget(QtWidgets.QLabel(" to "))
-        
-        self.z_max_spin = QtWidgets.QDoubleSpinBox()
-        self.z_max_spin.setRange(-10000, 10000)
-        self.z_max_spin.setDecimals(1)
-        self.z_max_spin.valueChanged.connect(self.update_z_range)
-        self.z_max_spin.valueChanged.connect(self.range_changed.emit)
-        tools_layout.addWidget(self.z_max_spin)
+        # Spacer
         
         # Spacer
         tools_layout.addSpacing(20)
@@ -207,13 +194,39 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         
         layout.addLayout(tools_layout)
         
+        # Time Slider Layout
+        self.time_container = QtWidgets.QWidget()
+        time_layout = QtWidgets.QHBoxLayout(self.time_container)
+        time_layout.setContentsMargins(0, 5, 0, 5)
+        
+        time_layout.addWidget(QtWidgets.QLabel("Time:"))
+        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.time_slider.setMinimum(0)
+        self.time_slider.setMaximum(max(0, len(self.time_values) - 1))
+        self.time_slider.setValue(self.current_time_idx)
+        self.time_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.time_slider.setTickInterval(1)
+        self.time_slider.valueChanged.connect(self.change_time)
+        time_layout.addWidget(self.time_slider)
+        
+        self.time_label = QtWidgets.QLabel("")
+        self.time_label.setMinimumWidth(120)
+        if self.time_values:
+            idx = min(self.current_time_idx, len(self.time_values)-1)
+            self.time_label.setText(self.time_values[idx])
+        time_layout.addWidget(self.time_label)
+        
+        layout.addWidget(self.time_container)
+        
+        # Update slider visibility
+        self.update_time_slider_visibility()
+        
         # Picking Info Label
         self.info_label = QtWidgets.QLabel("Click in plot to see cell info")
         self.info_label.setStyleSheet("font-weight: bold; color: #444; background: #f0f0f0; padding: 4px; border-radius: 4px;")
         layout.addWidget(self.info_label)
         
         # Store data for re-rendering
-        self.data = data
         self.colorbar = None
         self.vertex_lines = []
         self.label_items = []
@@ -235,17 +248,21 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.plot_widget.setLabel('bottom', 'Distance', units='m', **styles)
         self.plot_widget.showGrid(x=False, y=False)
         
-        # Add Mouse Handlers
-        self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
+        # Connect to range changes from user interaction (zoom/pan)
+        self.plot_widget.getViewBox().sigYRangeChanged.connect(self.on_range_changed)
+        self.plot_widget.getViewBox().sigXRangeChanged.connect(self.on_range_changed)
+        
+        # Connect mouse signals
         self.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
+        self.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
         
         # Render Data
         self.render_data(data, v_min=self.v_min, v_max=self.v_max, vertex_distances=vertex_distances)
         
         # Initialize Range Settings
-        self.init_ranges(data, z_range=z_range)
+        self.init_ranges(data, z_range=z_range, x_range=x_range)
 
-    def init_ranges(self, data, z_range=None):
+    def init_ranges(self, data, z_range=None, x_range=None):
         # Calculate elevation extremes from top and botm
         all_z = []
         if 'top' in data: all_z.append(data['top'])
@@ -262,43 +279,32 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 margin = (self.data_z_max - self.data_z_min) * 0.1
                 if margin == 0: margin = 1.0
                 
-                self.z_min_spin.blockSignals(True)
-                self.z_max_spin.blockSignals(True)
-                
                 if z_range:
-                    self.z_min_spin.setValue(z_range[0])
-                    self.z_max_spin.setValue(z_range[1])
+                    self.plot_widget.setYRange(z_range[0], z_range[1], padding=0)
                 else:
-                    self.z_min_spin.setValue(self.data_z_min - margin)
-                    self.z_max_spin.setValue(self.data_z_max + margin)
-                    
-                self.z_min_spin.blockSignals(False)
-                self.z_max_spin.blockSignals(False)
-                
-                self.update_z_range()
+                    self.plot_widget.setYRange(self.data_z_min - margin, self.data_z_max + margin, padding=0)
+        
+        if x_range:
+            self.plot_widget.setXRange(x_range[0], x_range[1], padding=0)
+        elif 'distances' in data and len(data['distances']) > 0:
+            self.plot_widget.setXRange(data['distances'].min(), data['distances'].max(), padding=0)
 
-    def update_z_range(self):
-        z_min = self.z_min_spin.value()
-        z_max = self.z_max_spin.value()
-        if z_max > z_min:
-            self.plot_widget.setYRange(z_min, z_max)
-            self.range_changed.emit()
+    def on_range_changed(self, vb, new_range):
+        """Notify that the plot range has changed."""
+        self.range_changed.emit()
 
     def reset_elevation_range(self):
         if hasattr(self, 'data_z_min'):
             margin = (self.data_z_max - self.data_z_min) * 0.1
             if margin == 0: margin = 1.0
-            
-            self.z_min_spin.blockSignals(True)
-            self.z_max_spin.blockSignals(True)
-            self.z_min_spin.setValue(self.data_z_min - margin)
-            self.z_max_spin.setValue(self.data_z_max + margin)
-            self.z_min_spin.blockSignals(False)
-            self.z_max_spin.blockSignals(False)
-            self.update_z_range()
+            self.plot_widget.setYRange(self.data_z_min - margin, self.data_z_max + margin, padding=0)
 
     def reset_ranges(self):
         self.reset_elevation_range()
+        # Reset X range
+        if 'distances' in self.data and len(self.data['distances']) > 0:
+            d = self.data['distances']
+            self.plot_widget.setXRange(d.min(), d.max(), padding=0)
         # Reset data range
         valid_vals = self.data['values'][~np.isnan(self.data['values'])]
         if len(valid_vals) > 0:
@@ -362,8 +368,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             return
             
         try:
-            # Fetch new data
-            new_data = self.data_fetcher(var_name, self.points)
+            # Fetch new data with current time
+            new_data = self.data_fetcher(var_name, self.points, time_idx=self.current_time_idx)
             if new_data:
                 if "error" in new_data:
                     QtWidgets.QMessageBox.warning(self, "Data Error", new_data['error'])
@@ -376,6 +382,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 # This addresses the user's request for "date range" (intended "data range") updates.
                 self.v_min = None
                 self.v_max = None
+                
+                # Update visibility in case the new variable has/doesn't have time
+                self.update_time_slider_visibility()
                 
                 self.setWindowTitle(f"Cross Section {self.cs_label}: {var_name}")
                 
@@ -396,16 +405,80 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.head_data = None
         else:
             try:
-                self.head_data = self.data_fetcher(head_var_name, self.points)
+                self.head_data = self.data_fetcher(head_var_name, self.points, time_idx=self.current_time_idx)
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch head data for {head_var_name}: {e}")
                 self.head_data = "Error"
         
+        # Update visibility in case the new variable has/doesn't have time
+        self.update_time_slider_visibility()
+        
         # Re-render with existing data
         self.render_data(self.data, vertex_distances=self.vertex_distances)
+        self.settings_changed.emit()
 
-    def refresh(self, all_vars=None, head_vars=None):
+    def change_time(self, time_idx):
+        self.current_time_idx = time_idx
+        if self.time_values:
+            idx = min(time_idx, len(self.time_values)-1)
+            self.time_label.setText(self.time_values[idx])
+            
+        # Refresh current variable data
+        try:
+            new_data = self.data_fetcher(self.current_var, self.points, time_idx=time_idx)
+            if new_data and "error" not in new_data:
+                self.data = new_data
+            
+            # Refresh head data if active
+            if self.current_head_var != "None":
+                new_head = self.data_fetcher(self.current_head_var, self.points, time_idx=time_idx)
+                if new_head and "error" not in new_head:
+                    self.head_data = new_head
+                    
+            self.render_data(self.data, vertex_distances=self.vertex_distances)
+            self.settings_changed.emit()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Time Error", f"Failed to update data for time index {time_idx}: {e}")
+
+    def update_time_slider_visibility(self):
+        # Only show slider if there are actually time steps available in the file
+        # AND if either the current main variable or the head variable has a time dimension.
+        if len(self.time_values) <= 1:
+            self.time_container.hide()
+            return
+
+        has_time = False
+        # The main data dict contains metadata if we added it in netcdf_handler.
+        # Let's check if the current data has multiple time steps available for this var.
+        # Actually, the handler returns sliced data. We can check the presence of 
+        # time dimension name in the original variable metadata provided by dockwidget.
+        
+        # A more direct way: check the datafetcher metadata if available, 
+        # but here we can just check self.data.get('has_time') if we add it.
+        if self.data and self.data.get('has_time', True):
+            has_time = True
+            
+        if self.head_data and self.head_data != "Error" and self.head_data.get('has_time', True):
+            has_time = True
+
+        if has_time:
+            self.time_container.show()
+        else:
+            self.time_container.hide()
+
+    def refresh(self, all_vars=None, head_vars=None, time_values=None):
         """Updates the available variables and reloads data for the current window."""
+        if time_values is not None:
+            self.time_values = time_values
+            self.time_slider.blockSignals(True)
+            self.time_slider.setMaximum(max(0, len(self.time_values) - 1))
+            self.current_time_idx = min(self.current_time_idx, self.time_slider.maximum())
+            self.time_slider.setValue(self.current_time_idx)
+            if self.time_values:
+                self.time_label.setText(self.time_values[self.current_time_idx])
+            self.time_slider.blockSignals(False)
+            self.update_time_slider_visibility()
+
         if head_vars is not None:
             self.head_vars = ["None"] + head_vars
             self.head_combo.blockSignals(True)
@@ -490,9 +563,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # Consistent with flat rendering, we want properties from the start of the cell segment
         seg_start_idx = idx - (idx % 2)
         
-        # Find the layer
-        top = self.data['top'][seg_start_idx]
-        botm = self.data['botm'][:, seg_start_idx]
+        # Find the layer using rendered boundaries (handles Wet Part shifting)
+        top = self.rendered_top[seg_start_idx]
+        botm = self.rendered_botm[:, seg_start_idx]
         num_layers = self.data['num_layers']
         
         found_layer = -1
@@ -503,7 +576,6 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             if np.isnan(l_top) or np.isnan(l_bot): continue
             
             # Check if z_click is between l_top and l_bot
-            # Keep in mind coordinate system (usually positive is up)
             z_min = min(l_top, l_bot)
             z_max = max(l_top, l_bot)
             if z_min <= z_click <= z_max:
@@ -597,8 +669,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             
             if self.head_data is None or self.head_data == "Error" or points_changed:
                 try:
-                    # Use the points currently stored in the window
-                    res = self.data_fetcher(self.current_head_var, self.points)
+                    # Use the points currently stored in the window and the current time
+                    res = self.data_fetcher(self.current_head_var, self.points, time_idx=self.current_time_idx)
                     if res and "error" not in res:
                         self.head_data = res
                     else:
@@ -666,6 +738,9 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             top = new_boundaries[0]
             for i in range(num_layers):
                 botm[i, :] = new_boundaries[i+1]
+        
+        self.rendered_top = top
+        self.rendered_botm = botm
         
         # Optimized Rendering using PColorMeshItem if available
         if PColorMeshItem is not None:
