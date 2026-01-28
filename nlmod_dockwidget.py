@@ -382,17 +382,25 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Could not fetch info: {e}")
 
-    def add_layer(self, force_new=False):
+    def add_layer(self, force_new=False, layer_to_update=None, params=None):
         if not self.handler:
             return
             
-        selected_items = self.var_list.selectedItems()
-        if not selected_items:
-            if not getattr(self, 'auto_update_var', False):
-                QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
-            return
-            
-        var_name = selected_items[0].data(QtCore.Qt.UserRole)
+        if params:
+            var_name = params.get('var_name')
+            layer_idx = int(params.get('layer_idx', 0))
+            time_idx = int(params.get('time_idx', 0))
+        else:
+            selected_items = self.var_list.selectedItems()
+            if not selected_items:
+                if not getattr(self, 'auto_update_var', False):
+                    QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
+                return
+                
+            var_name = selected_items[0].data(QtCore.Qt.UserRole)
+            layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
+            time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
+
         grid_type = self.handler.grid_type
         filepath = self.handler.filepath
         base_name = os.path.basename(filepath)
@@ -402,13 +410,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         use_mesh = (grid_type == "vertex")
         
         # Determine Layer name for legend
-        layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
-        layer_val = self.layer_combo.currentText() if self.layer_combo.isEnabled() else "1"
-        time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
-        time_val = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
+        if params:
+            if self.layer_combo.count() > layer_idx:
+                layer_val = self.layer_combo.itemText(layer_idx)
+            else:
+                layer_val = str(layer_idx + 1)
+            time_val = self.time_values[time_idx] if (0 <= time_idx < len(self.time_values)) else ""
+        else:
+            layer_val = self.layer_combo.currentText() if self.layer_combo.isEnabled() else "1"
+            time_val = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
         
         display_name = f"{var_name}"
-        if self.layer_combo.isEnabled(): display_name += f" ({layer_val})"
+        if layer_val: display_name += f" ({layer_val})"
         if time_val: display_name += f" [{time_val}]"
         display_name += f" @ {base_name}"
         
@@ -419,8 +432,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         qgs_crs = QgsCoordinateReferenceSystem(crs_def)
 
         # Check for existing managed layer (only if not forcing a new one)
-        existing_layer = None
-        if not force_new and self.active_map_layer:
+        existing_layer = layer_to_update
+        if not existing_layer and not force_new and self.active_map_layer:
             try:
                 # Check if layer still exists in the project
                 if self.active_map_layer.id() in QgsProject.instance().mapLayers():
@@ -440,11 +453,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if use_mesh and isinstance(layer, QgsMeshLayer):
                     # Check if this layer was created by our plugin for this file
                     if layer.customProperty("nlmod_inspector_source") == filepath:
+                        # If we are restoring, we might want to match the exact variable too
+                        if params and layer.customProperty("nlmod_inspector_var") != var_name:
+                            continue
                         existing_layer = layer
                         self.active_map_layer = layer
                         break
                 elif not use_mesh and isinstance(layer, QgsRasterLayer):
                     if layer.customProperty("nlmod_inspector_source") == filepath:
+                        if params and layer.customProperty("nlmod_inspector_var") != var_name:
+                            continue
                         existing_layer = layer
                         self.active_map_layer = layer
                         break
@@ -552,6 +570,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 # Mark this layer as managed by our plugin
                 layer.setCustomProperty("nlmod_inspector_source", filepath)
                 layer.setCustomProperty("nlmod_inspector_managed", True)
+                layer.setCustomProperty("nlmod_inspector_var", var_name)
+                layer.setCustomProperty("nlmod_inspector_layer_idx", int(layer_idx))
+                layer.setCustomProperty("nlmod_inspector_time_idx", int(time_idx))
                 
                 # Add to layer tree at the preserved position
                 layer_tree_root = QgsProject.instance().layerTreeRoot()
@@ -576,21 +597,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             uri = f'NETCDF:"{safe_path}":{var_name}'
             layer_name = f"{var_name} @ {base_name}"
             
-            # Determine Band Index FIRST (1-based)
-            band_idx = 1
-            
-            layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
-            time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
-            
-            # Use global count if the variable has layers, else 1
-            n_layers = self.layer_combo.count() if self.layer_combo.isEnabled() else 1
-            if n_layers == 0: n_layers = 1
+            # Determine n_layers for this specific variable from NetCDF dimensions
+            # This is crucial because different variables in the same file might have different dimensions
+            # and we need to know the correct stride for GDAL's band indexing.
+            n_layers = 1
+            if self.handler and self.handler.ds and var_name in self.handler.ds.variables:
+                var = self.handler.ds.variables[var_name]
+                for d in var.dimensions:
+                    # Common names for the vertical dimension in groundwater models
+                    if d.lower() in ['layer', 'z', 'layer_index', 'lev', 'k']:
+                        n_layers = self.handler.ds.dimensions[d].size
+                        break
             
             # GDAL flattens NetCDF dimensions: band_idx = time_idx * n_layers + layer_idx + 1
             band_idx = (time_idx * n_layers) + layer_idx + 1
+            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}] -> band={band_idx}", "NlmodInspector", Qgis.Info)
             
             safe_path = filepath.replace('\\', '/')
-            uri = f'NETCDF:"{safe_path}":{var_name}'
             # (Note: display_name is already calculated above)
 
             # --- VRT Workaround for Coordinates & Rotation ---
@@ -639,13 +662,22 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     else:
                         raise Exception("Could not open subdataset")
 
-                    # Save to unique vsimem path to bypass GDAL/QGIS caching
+                    # Save to physical temp file to allow QGIS to find it during project load
+                    # (vsimem is faster but disappears on restart, causing "Unavailable layers" warnings)
                     import time
                     ts = int(time.time() * 1000)
-                    vrt_mem_path = f"/vsimem/nlmod_raster_{id(self)}_{ts}.vrt"
-                    gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
-                    uri = vrt_mem_path
-                    QgsMessageLog.logMessage(f"NLMOD: Created VRT at {uri}", "NlmodInspector", Qgis.Info)
+                    vrt_path = os.path.join(tempfile.gettempdir(), f"nlmod_raster_{id(self)}_{ts}.vrt")
+                    
+                    try:
+                        with open(vrt_path, "w") as f:
+                            f.write(vrt_xml)
+                        uri = vrt_path
+                        QgsMessageLog.logMessage(f"NLMOD: Created VRT on disk at {uri}", "NlmodInspector", Qgis.Info)
+                    except Exception as e:
+                        QgsMessageLog.logMessage(f"NLMOD: Failed to write VRT to disk: {e}. Falling back to vsimem.", "NlmodInspector", Qgis.Warning)
+                        vrt_mem_path = f"/vsimem/nlmod_raster_{id(self)}_{ts}.vrt"
+                        gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
+                        uri = vrt_mem_path
             except Exception as e:
                 QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NlmodInspector", Qgis.Warning)
 
@@ -678,13 +710,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if not existing_layer.crs().isValid() or existing_layer.crs() != qgs_crs:
                     existing_layer.setCrs(qgs_crs)
 
+                # Update metadata properties
+                existing_layer.setCustomProperty("nlmod_inspector_var", var_name)
+                existing_layer.setCustomProperty("nlmod_inspector_layer_idx", int(layer_idx))
+                existing_layer.setCustomProperty("nlmod_inspector_time_idx", int(time_idx))
+
                 existing_layer.triggerRepaint()
                 
-                # Cleanup old vsimem VRT
-                if "/vsimem/nlmod_raster_" in old_uri:
+                # Cleanup old temp VRT
+                if "nlmod_raster_" in old_uri:
                     try:
-                        from osgeo import gdal
-                        gdal.Unlink(old_uri)
+                        if "/vsimem/" in old_uri:
+                            from osgeo import gdal
+                            gdal.Unlink(old_uri)
+                        elif os.path.exists(old_uri):
+                            os.remove(old_uri)
                     except:
                         pass
                 
@@ -699,6 +739,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     # Mark this layer as managed by our plugin
                     layer.setCustomProperty("nlmod_inspector_source", filepath)
                     layer.setCustomProperty("nlmod_inspector_managed", True)
+                    layer.setCustomProperty("nlmod_inspector_var", var_name)
+                    layer.setCustomProperty("nlmod_inspector_layer_idx", int(layer_idx))
+                    layer.setCustomProperty("nlmod_inspector_time_idx", int(time_idx))
                     
                     self.active_map_layer = layer
                     self.active_var_name = var_name
@@ -1668,6 +1711,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             win.head_combo.setCurrentText(cs['head_variable'])
                 except Exception as e:
                     QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)
+                
+                # Restore added map layers
+                self.restore_managed_layers()
+
             else:
                 if filepath:
                     QgsMessageLog.logMessage(f"NLMOD: Saved filepath does not exist: {filepath}", "NlmodInspector", Qgis.Warning)
@@ -1680,3 +1727,43 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 pass
             self.visibilityChanged.connect(self.save_state_to_project)
             # DO NOT call save_state_to_project() here
+
+    def restore_managed_layers(self):
+        """Finds all layers in the project that were created by this plugin and refreshes them."""
+        if not self.handler:
+            return
+            
+        from qgis.core import QgsProject, Qgis, QgsMessageLog
+        filepath = self.handler.filepath
+        layers_to_refresh = []
+        
+        # We use a list to avoid issues with modifying the project during iteration
+        for layer in list(QgsProject.instance().mapLayers().values()):
+            if layer.customProperty("nlmod_inspector_managed"):
+                if layer.customProperty("nlmod_inspector_source") == filepath:
+                    layers_to_refresh.append(layer)
+        
+        if layers_to_refresh:
+            QgsMessageLog.logMessage(f"NLMOD: Restoring {len(layers_to_refresh)} managed layers", "NlmodInspector", Qgis.Info)
+            
+        for layer in layers_to_refresh:
+            var_name = layer.customProperty("nlmod_inspector_var")
+            if not var_name: continue
+            
+            # Read properties
+            try:
+                layer_idx = int(layer.customProperty("nlmod_inspector_layer_idx") or 0)
+                time_idx = int(layer.customProperty("nlmod_inspector_time_idx") or 0)
+            except (ValueError, TypeError):
+                layer_idx = 0
+                time_idx = 0
+                
+            params = {
+                'var_name': var_name,
+                'layer_idx': layer_idx,
+                'time_idx': time_idx
+            }
+            
+            # Refresh this layer
+            # We use force_new=False because we want to update the existing layer object if possible
+            self.add_layer(force_new=False, layer_to_update=layer, params=params)
