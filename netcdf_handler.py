@@ -223,6 +223,30 @@ class NetcdfHandler:
             # If it's absolute, xm_min/ym_max ARE the world coordinates.
             return [xm_min, dx, 0, ym_max, 0, -dy]
 
+    def get_vars_with_time(self):
+        """Returns a list of variable names that have a time dimension."""
+        if not self.ds:
+            return []
+            
+        vars_with_time = []
+        possible_times = {'time'}
+        
+        for name, var in self.ds.variables.items():
+            # Skip coordinate variables themselves
+            if name.lower() in possible_times:
+                continue
+                
+            has_time = False
+            for d in var.dimensions:
+                if d.lower() in possible_times:
+                    has_time = True
+                    break
+            
+            if has_time:
+                vars_with_time.append(name)
+                
+        return sorted(vars_with_time)
+
     def get_crs(self):
         """Attempts to find CRS definition in the NetCDF file."""
         if not self.ds:
@@ -1076,6 +1100,152 @@ class NetcdfHandler:
         except Exception as e:
             import traceback
             return False, f"Export failed: {str(e)}\n{traceback.format_exc()}"
+
+    def get_timeseries_data(self, var_name, world_pt, layer_indices=None):
+        """
+        Extracts time series data at a point for one or more layers.
+        world_pt should be QgsPointXY or (x, y) in world coordinates.
+        layer_indices is a list of integers. Defaults to [0].
+        Returns: {
+            'times': [str, ...],
+            'values': { layer_idx: [data, ...], ... },
+            'layer_names': [str, ...],
+            'var_name': str,
+            'unit': str,
+            'point': (x, y)
+        }
+        """
+        if not self.ds or var_name not in self.ds.variables:
+            return None
+
+        import numpy as np
+        if hasattr(world_pt, 'x'):
+            wx, wy = world_pt.x(), world_pt.y()
+        else:
+            wx, wy = world_pt
+            
+        mx, my = self.transform_world_to_model(wx, wy)
+        
+        # 1. Find the cell index
+        cell_idx = None
+        if self.grid_type == 'structured':
+            x_vals = None
+            y_vals = None
+            vkeys = self.ds.variables.keys()
+            for pair in [('x', 'y'), ('lon', 'lat'), ('longitude', 'latitude')]:
+                if pair[0] in vkeys and pair[1] in vkeys:
+                    x_vals, y_vals = self.ds.variables[pair[0]][:], self.ds.variables[pair[1]][:]
+                    break
+            
+            if x_vals is not None and y_vals is not None:
+                dx = np.abs(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else 0
+                dy = np.abs(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else 0
+                
+                # Find closest indices
+                c = np.argmin(np.abs(x_vals - mx))
+                r = np.argmin(np.abs(y_vals - my))
+                
+                # Check if within cell bounds (with small margin)
+                if np.abs(x_vals[c] - mx) <= dx * 0.501 and np.abs(y_vals[r] - my) <= dy * 0.501:
+                    cell_idx = (r, c)
+        else:
+            # Vertex grid - use spatial index
+            if 'strtree' not in self._cache:
+                # Force building the cache if it's missing (needed if cross-section hasn't been used yet)
+                icv = self._get_topology_var('icvert')
+                xv_m = self._get_topology_var('xv')
+                yv_m = self._get_topology_var('yv')
+                if icv is not None and xv_m is not None and yv_m is not None and shapely:
+                    nodata = getattr(self.ds.variables['icvert'], 'nodata', -1)
+                    polys = []
+                    poly_indices = []
+                    for i in range(len(icv)):
+                        v_idx = icv[i][icv[i] != nodata]
+                        if len(v_idx) >= 3:
+                            polys.append(Polygon(zip(xv_m[v_idx], yv_m[v_idx])))
+                            poly_indices.append(i)
+                    self._cache['polys'] = polys
+                    self._cache['poly_indices'] = poly_indices
+                    self._cache['strtree'] = STRtree(polys)
+            
+            if 'strtree' in self._cache:
+                from shapely.geometry import Point
+                pt = Point(mx, my)
+                tree = self._cache['strtree']
+                res = tree.query(pt, predicate='intersects')
+                if len(res) > 0:
+                    idx_in_tree = res[0]
+                    cell_idx = self._cache['poly_indices'][idx_in_tree]
+        
+        if cell_idx is None:
+            return {"error": "No cell found at this location."}
+
+        # 2. Extract time series
+        var = self.ds.variables[var_name]
+        dims = var.dimensions
+        
+        if layer_indices is None:
+            layer_indices = [0]
+            
+        # Identify dimensions
+        possible_layers = {'layer', 'z', 'level', 'lev', 'k'}
+        possible_times = {'time'}
+        
+        time_dim_idx = None
+        layer_dim_idx = None
+        
+        for i, d in enumerate(dims):
+            d_lower = d.lower()
+            if d_lower in possible_times:
+                time_dim_idx = i
+            elif d_lower in possible_layers:
+                layer_dim_idx = i
+        
+        if time_dim_idx is None:
+            return {"error": f"Variable '{var_name}' does not have a time dimension."}
+
+        # Retrieve all times once
+        dim_meta = self.get_dimensions_metadata()
+        time_values = dim_meta['times']
+        layer_names = dim_meta['layers']
+        
+        unit = getattr(var, 'units', '')
+        
+        results = {
+            'times': time_values, 
+            'values': {}, 
+            'layer_names': layer_names,
+            'var_name': var_name,
+            'unit': unit,
+            'point': (wx, wy),
+            'has_layers': layer_dim_idx is not None,
+            'cell_info': cell_idx
+        }
+        
+        # If no layer dimension, we only need to fetch once
+        target_indices = layer_indices if layer_dim_idx is not None else [0]
+        
+        for lyr in target_indices:
+            sl = [slice(None)] * var.ndim
+            if layer_dim_idx is not None:
+                if lyr >= len(layer_names): continue
+                sl[layer_dim_idx] = lyr
+            
+            if self.grid_type == 'structured':
+                sl[-2] = cell_idx[0]
+                sl[-1] = cell_idx[1]
+            else:
+                sl[-1] = cell_idx
+            
+            data = var[tuple(sl)]
+            
+            # Handle masked arrays: fill with NaN
+            if hasattr(data, 'filled'):
+                data = data.filled(np.nan)
+            
+            results['values'][lyr] = data.tolist()
+            
+        return results
 
     def get_variable_stats(self, var_name, layer_idx=0, time_idx=0):
         """Returns the min and max values for a specific variable slice."""

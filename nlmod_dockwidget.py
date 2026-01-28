@@ -9,6 +9,9 @@ from .netcdf_handler import NetcdfHandler
 import os
 import tempfile
 import json
+import time as py_time
+from .time_series_plot import TimeSeriesPlotWindow
+from .time_series_tool import TimeSeriesMapTool
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QPointF
 from qgis.core import QgsPointXY, QgsGeometry, QgsWkbTypes
 
@@ -54,6 +57,33 @@ class VertexEditorDialog(QtWidgets.QDialog):
             except ValueError:
                 continue
         return pts
+
+class PointEditorDialog(QtWidgets.QDialog):
+    def __init__(self, point, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Point Coordinates")
+        layout = QtWidgets.QFormLayout(self)
+        self.x_edit = QtWidgets.QLineEdit(f"{point.x():.3f}")
+        self.y_edit = QtWidgets.QLineEdit(f"{point.y():.3f}")
+        layout.addRow("X (Easting):", self.x_edit)
+        layout.addRow("Y (Northing):", self.y_edit)
+        
+        # Add note about projection
+        note = QtWidgets.QLabel("Note: Coordinates should be in the model CRS.")
+        note.setStyleSheet("font-style: italic; color: #666;")
+        layout.addRow(note)
+        
+        self.btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.btns.accepted.connect(self.accept)
+        self.btns.rejected.connect(self.reject)
+        layout.addRow(self.btns)
+
+    def get_point(self):
+        try:
+            return QgsPointXY(float(self.x_edit.text()), float(self.y_edit.text()))
+        except:
+            return None
 
 class MainSettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, auto_var=False, auto_layer=False, auto_time=False):
@@ -213,6 +243,34 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         layout.addWidget(cs_group, 0)
         
+        # Time Series Group
+        self.ts_group = QtWidgets.QGroupBox("Time Series")
+        ts_layout = QtWidgets.QVBoxLayout()
+        self.ts_group.setLayout(ts_layout)
+        
+        ts_btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_add_ts = QtWidgets.QPushButton("Add")
+        self.btn_add_ts.clicked.connect(self.activate_point_tool)
+        ts_btn_layout.addWidget(self.btn_add_ts)
+        
+        self.btn_remove_ts = QtWidgets.QPushButton("Remove")
+        self.btn_remove_ts.setEnabled(False)
+        self.btn_remove_ts.clicked.connect(self.remove_time_series)
+        ts_btn_layout.addWidget(self.btn_remove_ts)
+        
+        ts_layout.addLayout(ts_btn_layout)
+        
+        self.ts_list = QtWidgets.QListWidget()
+        self.ts_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.ts_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ts_list.customContextMenuRequested.connect(self.on_ts_list_context_menu)
+        self.ts_list.itemSelectionChanged.connect(self.on_ts_selection_changed)
+        self.ts_list.itemSelectionChanged.connect(self.update_ui_state)
+        self.ts_list.itemDoubleClicked.connect(self.raise_timeseries_window)
+        ts_layout.addWidget(self.ts_list)
+        
+        layout.addWidget(self.ts_group, 0)
+        
         # Stretch to fill bottom
         layout.addStretch()
         
@@ -225,6 +283,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.cs_geometries = {}  # Dictionary to store cross-section line geometries
         self.cs_rubber_bands = {}  # Dictionary to store QgsRubberBand for each CS
         self.active_cs_id = None  # Track which CS is currently being edited/drawn
+        
+        self.ts_windows = {}    # item_id -> window
+        self.ts_points = {}     # item_id -> QgsPointXY
+        self.ts_markers = {}    # item_id -> QgsVertexMarker
+        self.active_ts_id = None
+        
         self.prev_map_tool = None # Store map tool before activation
         self.sync_marker = None   # Marker for plot synchronization
         
@@ -285,13 +349,20 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
         self.populate_vars()
         
-        # Update existing cross-sections with new data/variables
+        # Update existing cross-sections and time series with new data/variables
         vars_3d = self.get_vars_3d()
         all_vars = self.get_all_vars()
+        all_vars_with_time = self.get_vars_with_time()
         times = dim_meta["times"]
         for win in self.plot_windows.values():
             win.refresh(vars_3d, head_vars=all_vars, time_values=times)
+        
+        for win in self.ts_windows.values():
+            win.refresh(all_vars=all_vars_with_time)
             
+        # Hide Time Series group if no time dimension
+        self.ts_group.setVisible(len(self.time_values) > 0)
+        
         self.save_state_to_project()
 
     def populate_vars(self):
@@ -344,6 +415,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except:
             pass
         return vars_3d
+
+    def get_vars_with_time(self):
+        if self.handler:
+            return self.handler.get_vars_with_time()
+        return []
 
     def get_all_vars(self):
         """Helper to get all variable names."""
@@ -1400,7 +1476,42 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         """Called when selection in cross-section list changes."""
         selected = self.cs_list.selectedItems()
         if selected:
+            # Clear TS selection to avoid tool conflicts
+            self.ts_list.blockSignals(True)
+            self.ts_list.clearSelection()
+            self.ts_list.blockSignals(False)
+            
             self.highlight_cross_section(selected[0])
+
+    def on_ts_selection_changed(self):
+        """Called when selection in time series list changes."""
+        selected = self.ts_list.selectedItems()
+        if selected:
+            # Clear CS selection to avoid tool conflicts
+            self.cs_list.blockSignals(True)
+            self.cs_list.clearSelection()
+            self.cs_list.blockSignals(False)
+            
+            # Note: highlight_cross_section already handles clearing markers/tool if needed?
+            # No, but we can do it here. 
+            item_id = selected[0].data(QtCore.Qt.UserRole)
+            self.active_ts_id = item_id
+            
+            if item_id in self.ts_points:
+                # Automatically activate/initialize tool for dragging if not active
+                if self.iface.mapCanvas().mapTool() != getattr(self, 'ts_tool', None):
+                    self.activate_point_tool()
+                
+                # Update the tool's marker position
+                if hasattr(self, 'ts_tool') and self.ts_tool:
+                    self.ts_tool.set_point(self.ts_points[item_id])
+                    
+            # Reset CS highlight state (un-highlight all)
+            for rb in self.cs_rubber_bands.values():
+                from qgis.PyQt.QtGui import QColor
+                rb.setWidth(2)
+                rb.setColor(QColor(255, 0, 0, 100))
+            self.active_cs_id = None
 
     def remove_cross_section_by_id(self, item_id):
         """Cleanup when plot window is closed directly or removed from list."""
@@ -1436,12 +1547,246 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.cs_list.takeItem(i)
                 self.cs_list.blockSignals(False)
                 break
+    def activate_point_tool(self):
+        if not self.handler:
+            QtWidgets.QMessageBox.warning(self, "Warning", "Please open a NetCDF file first.")
+            return
+
+        if not hasattr(self, 'ts_tool') or not self.ts_tool:
+            self.ts_tool = TimeSeriesMapTool(self.iface.mapCanvas())
+            self.ts_tool.point_clicked.connect(self.on_point_picked)
+            self.ts_tool.point_moved.connect(self.on_point_moved)
+
+        curr_tool = self.iface.mapCanvas().mapTool()
+        if curr_tool != self.ts_tool:
+            self.prev_map_tool = curr_tool
+            
+        self.iface.mapCanvas().setMapTool(self.ts_tool)
+
+    def on_point_picked(self, point):
+        # Create a new Time Series
+        win = self.add_time_series_plot(point)
+        if not win and hasattr(self, 'ts_tool') and self.ts_tool:
+            # Clear the temporary marker if plot creation failed (e.g. no time dimension)
+            self.ts_tool.clear_point()
+            
+            # Only deactivate if it failed
+            if self.prev_map_tool:
+                self.iface.mapCanvas().setMapTool(self.prev_map_tool)
+                self.prev_map_tool = None
+
+    def on_point_moved(self, point):
+        if self.active_ts_id and self.active_ts_id in self.ts_windows:
+            win = self.ts_windows[self.active_ts_id]
+            win.point = point
+            # Refresh data (this calls update_info_label inside)
+            win.change_variable(win.current_var)
+            
+            # Update markers
+            if self.active_ts_id in self.ts_markers:
+                self.ts_markers[self.active_ts_id].setCenter(point)
+            
+            self.ts_points[self.active_ts_id] = point
+            self.save_state_to_project()
+
+    def add_time_series_plot(self, point, var_name=None, ts_label=None, item_id=None, layer_indices=None):
+        if not self.handler: return
+        
+        if not var_name:
+            selected = self.var_list.selectedItems()
+            var_name = selected[0].data(QtCore.Qt.UserRole) if selected else self.get_vars_with_time()[0]
+        
+        if not item_id:
+            import uuid
+            item_id = str(uuid.uuid4())
+            
+        if not ts_label:
+            ts_label = str(len(self.ts_windows) + 1)
+            
+        if layer_indices is None:
+            # Match current layer selection if possible
+            layer_indices = [self.layer_combo.currentIndex()] if self.layer_combo.isEnabled() else [0]
+
+        # Fetch initial data
+        from qgis.PyQt.QtGui import QColor
+        from qgis.gui import QgsVertexMarker
+        try:
+            data = self.handler.get_timeseries_data(var_name, point, layer_indices)
+            if not data or "error" in data:
+                QtWidgets.QMessageBox.warning(self, "Error", data.get("error", "No data found"))
+                return
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch data: {e}")
+            return
+
+        win = TimeSeriesPlotWindow(
+            data, var_name, parent=self.iface.mainWindow(),
+            item_id=item_id, all_vars=self.get_vars_with_time(),
+            data_fetcher=self.handler.get_timeseries_data,
+            label=ts_label, point=point, layer_indices=layer_indices
+        )
+        
+        self.ts_windows[item_id] = win
+        self.ts_points[item_id] = point
+        
+        # Create persistent marker
+        marker = QgsVertexMarker(self.iface.mapCanvas())
+        marker.setCenter(point)
+        marker.setColor(QColor(0, 0, 255))
+        marker.setIconType(QgsVertexMarker.ICON_X)
+        marker.setPenWidth(2)
+        marker.setIconSize(10)
+        self.ts_markers[item_id] = marker
+        
+        # Signals
+        win.variable_changed.connect(lambda id, v: self.update_ts_list_item(id))
+        win.layers_changed.connect(lambda id, l: self.save_state_to_project())
+        # Removing win.closed connection to remove_time_series_by_id 
+        # so closing the pane doesn't remove it from the list.
+        # Change visibility to Bottom pane as requested
+        self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, win)
+        
+        # Add to list
+        item = QtWidgets.QListWidgetItem(f"P{ts_label}: {var_name}")
+        item.setData(QtCore.Qt.UserRole, item_id)
+        self.ts_list.addItem(item)
+        self.ts_list.setCurrentItem(item)
+        
+        self.active_ts_id = item_id
+        if hasattr(self, 'ts_tool'):
+            self.ts_tool.set_point(point)
+
+        self.save_state_to_project()
+        return win
+
+    def update_ts_list_item(self, item_id):
+        if item_id in self.ts_windows:
+            win = self.ts_windows[item_id]
+            for i in range(self.ts_list.count()):
+                item = self.ts_list.item(i)
+                if item.data(QtCore.Qt.UserRole) == item_id:
+                    item.setText(f"P{win.label}: {win.current_var}")
+                    break
+        self.save_state_to_project()
+
+    def remove_time_series(self):
+        selected = self.ts_list.selectedItems()
+        if not selected: return
+        item_id = selected[0].data(QtCore.Qt.UserRole)
+        self.remove_time_series_by_id(item_id)
+
+    def remove_time_series_by_id(self, item_id):
+        if item_id in self.ts_windows:
+            win = self.ts_windows.pop(item_id)
+            self.iface.removeDockWidget(win)
+            win.deleteLater()
+            
+        if item_id in self.ts_markers:
+            m = self.ts_markers.pop(item_id)
+            self.iface.mapCanvas().scene().removeItem(m)
+            
+        if item_id in self.ts_points:
+            del self.ts_points[item_id]
+            
+        for i in range(self.ts_list.count()):
+            item = self.ts_list.item(i)
+            if item.data(QtCore.Qt.UserRole) == item_id:
+                self.ts_list.takeItem(i)
+                break
+                
+        if self.active_ts_id == item_id:
+            self.active_ts_id = None
+            if hasattr(self, 'ts_tool'):
+                self.ts_tool.set_point(None)
+                
+        self.save_state_to_project()
         self.update_ui_state()
+
+    def raise_timeseries_window(self, item=None):
+        if not item:
+            selected = self.ts_list.selectedItems()
+            if not selected: return
+            item = selected[0]
+            
+        item_id = item.data(QtCore.Qt.UserRole)
+        if item_id in self.ts_windows:
+            win = self.ts_windows[item_id]
+            win.show()
+            win.raise_()
+            win.activateWindow() # Add focus
+            self.active_ts_id = item_id
+            if hasattr(self, 'ts_tool'):
+                self.ts_tool.set_point(self.ts_points[item_id])
+
+    def on_ts_list_context_menu(self, pos):
+        item = self.ts_list.itemAt(pos)
+        if not item: return
+        
+        item_id = item.data(QtCore.Qt.UserRole)
+        
+        menu = QtWidgets.QMenu(self)
+        rename_action = menu.addAction("Rename")
+        edit_pos_action = menu.addAction("Edit Coordinates...")
+        
+        menu.addSeparator()
+        
+        move_up = menu.addAction("Move Up")
+        move_down = menu.addAction("Move Down")
+        
+        action = menu.exec_(self.ts_list.mapToGlobal(pos))
+        
+        if action == rename_action:
+            self.rename_time_series(item)
+        elif action == edit_pos_action:
+            self.edit_ts_point(item_id)
+        elif action == move_up:
+            self.move_ts_item(item, -1)
+        elif action == move_down:
+            self.move_ts_item(item, 1)
+
+    def move_ts_item(self, item, direction):
+        row = self.ts_list.row(item)
+        new_row = row + direction
+        if 0 <= new_row < self.ts_list.count():
+            # Remove and re-insert
+            self.ts_list.takeItem(row)
+            self.ts_list.insertItem(new_row, item)
+            self.ts_list.setCurrentItem(item)
+            self.save_state_to_project()
+
+    def rename_time_series(self, item):
+        item_id = item.data(QtCore.Qt.UserRole)
+        win = self.ts_windows.get(item_id)
+        if not win: return
+        
+        new_label, ok = QtWidgets.QInputDialog.getText(
+            self, "Rename Time Series", "New Label:", 
+            QtWidgets.QLineEdit.Normal, win.label)
+            
+        if ok and new_label:
+            win.label = new_label
+            win.setWindowTitle(f"Time Series {new_label}: {win.current_var}")
+            self.update_ts_list_item(item_id)
+            self.save_state_to_project()
+
+    def edit_ts_point(self, item_id):
+        point = self.ts_points.get(item_id)
+        if not point: return
+        
+        dlg = PointEditorDialog(point, self)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            new_point = dlg.get_point()
+            if new_point:
+                self.active_ts_id = item_id
+                self.on_point_moved(new_point)
 
     def update_ui_state(self):
         """Enable/Disable buttons based on current state."""
-        has_selection = len(self.cs_list.selectedItems()) > 0
-        self.btn_remove_cs.setEnabled(has_selection)
+        has_selection_cs = len(self.cs_list.selectedItems()) > 0
+        self.btn_remove_cs.setEnabled(has_selection_cs)
+        
+        has_selection_ts = len(self.ts_list.selectedItems()) > 0
+        self.btn_remove_ts.setEnabled(has_selection_ts)
 
     def clear_all_cross_sections(self):
         """Removes all cross-sections and resets the plugin state."""
@@ -1465,6 +1810,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # 2. Clear dictionaries and lists
             self.cs_geometries.clear()
             self.cs_list.clear()
+            
+            # 3. Remove all Time Series
+            ids = list(self.ts_windows.keys())
+            for item_id in ids:
+                if item_id in self.ts_windows:
+                    win = self.ts_windows.pop(item_id)
+                    self.iface.removeDockWidget(win)
+                    win.close()
+                    win.deleteLater()
+                if item_id in self.ts_markers:
+                    m = self.ts_markers.pop(item_id)
+                    self.iface.mapCanvas().scene().removeItem(m)
+            
+            self.ts_list.clear()
+            self.ts_points.clear()
+            self.active_ts_id = None
+
             self.var_list.clear()
             self.info_text.clear()
             self.file_edit.clear()
@@ -1655,6 +2017,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 })
         
         QgsProject.instance().writeEntry("NlmodInspector", "cross_sections", json.dumps(cs_list))
+        
+        # Save Time Series
+        ts_data = []
+        for item_id, win in self.ts_windows.items():
+            pt = self.ts_points.get(item_id)
+            if not pt: continue
+            ts_data.append({
+                'id': item_id,
+                'label': win.label,
+                'variable': win.current_var,
+                'point': (float(pt.x()), float(pt.y())),
+                'layer_indices': win.layer_indices,
+                'visible': win.isVisible()
+            })
+        QgsProject.instance().writeEntry("NlmodInspector", "time_series", json.dumps(ts_data))
 
     def restore_state_from_project(self):
         """Restores plugin state from project entries."""
@@ -1721,8 +2098,26 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 except Exception as e:
                     QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)
                 
-                # Restore added map layers
+                # Restore managed layers
                 self.restore_managed_layers()
+                
+                # Restore Time Series
+                ts_json, _ = QgsProject.instance().readEntry("NlmodInspector", "time_series", "[]")
+                try:
+                    ts_list = json.loads(ts_json)
+                    for ts in ts_list:
+                        point = QgsPointXY(ts['point'][0], ts['point'][1])
+                        win = self.add_time_series_plot(
+                            point, 
+                            ts['variable'], 
+                            ts_label=ts['label'], 
+                            item_id=ts['id'],
+                            layer_indices=ts.get('layer_indices')
+                        )
+                        if win and not ts.get('visible', True):
+                            win.hide()
+                except Exception as e:
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore time series: {e}", "NlmodInspector", Qgis.Warning)
 
             else:
                 if filepath:
