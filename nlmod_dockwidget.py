@@ -140,6 +140,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.var_list = QtWidgets.QListWidget()
         self.var_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.var_list.itemSelectionChanged.connect(self.update_layer_selection)
+        self.var_list.itemDoubleClicked.connect(lambda: self.add_layer(force_new=True))
         self.var_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.var_list.customContextMenuRequested.connect(self.handle_var_context_menu)
         layer_group_layout.addWidget(QtWidgets.QLabel("Variables:"))
