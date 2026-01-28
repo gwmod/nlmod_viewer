@@ -155,8 +155,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         layer_group_layout.addLayout(layer_sel_layout)
 
         # Time Selection
-        time_sel_layout = QtWidgets.QHBoxLayout()
-        time_sel_layout.addWidget(QtWidgets.QLabel("Select Time:"))
+        self.time_widget = QtWidgets.QWidget()
+        time_sel_layout = QtWidgets.QHBoxLayout(self.time_widget)
+        time_sel_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.time_heading = QtWidgets.QLabel("Select Time:")
+        time_sel_layout.addWidget(self.time_heading)
         
         self.time_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.time_slider.setEnabled(False)
@@ -169,7 +173,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.time_label.setMinimumWidth(100)
         time_sel_layout.addWidget(self.time_label)
         
-        layer_group_layout.addLayout(time_sel_layout)
+        layer_group_layout.addWidget(self.time_widget)
+        self.time_widget.setVisible(False)
         
         # Add to Map Button
         self.load_btn = QtWidgets.QPushButton("Add to Map")
@@ -264,6 +269,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.layer_combo.blockSignals(False)
         
         self.time_values = dim_meta["times"]
+        has_time = len(self.time_values) > 0
+        self.time_widget.setVisible(has_time)
+        
         self.time_slider.blockSignals(True)
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(max(0, len(self.time_values) - 1))
