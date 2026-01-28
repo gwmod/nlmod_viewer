@@ -1216,6 +1216,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win.range_changed.connect(self.save_state_to_project)
             win.visibilityChanged.connect(self.save_state_to_project)
             win.settings_changed.connect(self.save_state_to_project)
+            win.sigPointPicked.connect(self.on_cs_point_picked)
+            win.variable_changed.connect(lambda id, v: self.sync_ts_on_cross_sections())
             
             # Create Label: A: Head
             display_label = f"{cs_label}: {var_name}"
@@ -1512,6 +1514,68 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 rb.setWidth(2)
                 rb.setColor(QColor(255, 0, 0, 100))
             self.active_cs_id = None
+            self.sync_ts_on_cross_sections()
+
+    def sync_ts_on_cross_sections(self):
+        """Draw markers on cross-section plots for any TS points that intersect them."""
+        import numpy as np
+        for cs_id, cs_win in self.plot_windows.items():
+            cs_win.clear_ts_sync_markers()
+            
+            # Check cell indices in cross-section
+            if not hasattr(cs_win, 'data') or 'indices' not in cs_win.data:
+                continue
+                
+            cs_indices = cs_win.data['indices']
+            dists = cs_win.data['distances']
+            rendered_top = getattr(cs_win, 'rendered_top', None)
+            rendered_botm = getattr(cs_win, 'rendered_botm', None)
+            
+            if rendered_top is None or rendered_botm is None:
+                continue
+            
+            for ts_id, ts_win in self.ts_windows.items():
+                if ts_win.current_var != cs_win.current_var:
+                    continue
+                
+                # Find cell info for TS
+                if not ts_win.data or 'cell_info' not in ts_win.data:
+                    continue
+                
+                ts_cell = ts_win.data['cell_info']
+                
+                # Find where this cell is in the CS segments
+                if isinstance(ts_cell, (list, tuple)):
+                    # Structured
+                    tr, tc = ts_cell
+                    if isinstance(cs_indices, tuple):
+                        csr, csc = cs_indices
+                        matches = np.where((csr == tr) & (csc == tc))[0]
+                else:
+                    # Vertex
+                    if not isinstance(cs_indices, tuple):
+                        matches = np.where(cs_indices == ts_cell)[0]
+                
+                # Double points fix: each segment has two entries (entry/exit). 
+                # We only want the starting index (even) to get the correct midpoint.
+                matches = [m for m in matches if m % 2 == 0]
+                
+                for m_idx in matches:
+                    # dists has double points [entry, exit, entry, exit]
+                    # indices/values match these segments.
+                    # We usually want the flat parts if they exist.
+                    # m_idx is the index into indices/values and first of distance pair.
+                    x_mid = (dists[m_idx] + dists[m_idx+1]) / 2.0
+                    
+                    # For each selected layer in TS
+                    for lyr_idx in ts_win.layer_indices:
+                        if lyr_idx < rendered_botm.shape[0]:
+                            l_top = rendered_top[m_idx] if lyr_idx == 0 else rendered_botm[lyr_idx-1, m_idx]
+                            l_bot = rendered_botm[lyr_idx, m_idx]
+                            
+                            if not np.isnan(l_top) and not np.isnan(l_bot):
+                                y_mid = (l_top + l_bot) / 2.0
+                                cs_win.add_ts_sync_marker(x_mid, y_mid)
 
     def remove_cross_section_by_id(self, item_id):
         """Cleanup when plot window is closed directly or removed from list."""
@@ -1547,6 +1611,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.cs_list.takeItem(i)
                 self.cs_list.blockSignals(False)
                 break
+        
+        self.sync_ts_on_cross_sections()
     def activate_point_tool(self):
         if not self.handler:
             QtWidgets.QMessageBox.warning(self, "Warning", "Please open a NetCDF file first.")
@@ -1582,12 +1648,31 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # Refresh data (this calls update_info_label inside)
             win.change_variable(win.current_var)
             
+            # Snap to what the handler found
+            if 'point' in win.data:
+                from qgis.core import QgsPointXY
+                px, py = win.data['point']
+                point = QgsPointXY(px, py)
+                win.point = point
+            
             # Update markers
             if self.active_ts_id in self.ts_markers:
                 self.ts_markers[self.active_ts_id].setCenter(point)
             
+            if hasattr(self, 'ts_tool') and self.ts_tool:
+                self.ts_tool.set_point(point)
+            
             self.ts_points[self.active_ts_id] = point
             self.save_state_to_project()
+            self.sync_ts_on_cross_sections()
+
+    def on_cs_point_picked(self, point):
+        """Called when a point is clicked in a cross-section plot."""
+        # Only act if we are currently in "Add Time Series" mode or TS tool is active
+        if hasattr(self, 'ts_tool') and self.iface.mapCanvas().mapTool() == self.ts_tool:
+            # If we are NOT dragging an existing point, treat this as a new point pick
+            if not self.ts_tool.is_dragging:
+                self.on_point_picked(point)
 
     def add_time_series_plot(self, point, var_name=None, ts_label=None, item_id=None, layer_indices=None):
         if not self.handler: return
@@ -1604,8 +1689,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             ts_label = str(len(self.ts_windows) + 1)
             
         if layer_indices is None:
-            # Match current layer selection if possible
-            layer_indices = [self.layer_combo.currentIndex()] if self.layer_combo.isEnabled() else [0]
+            # Default to all layers for time series
+            dim_meta = self.handler.get_dimensions_metadata()
+            if dim_meta['layers']:
+                layer_indices = list(range(len(dim_meta['layers'])))
+            else:
+                layer_indices = [0]
 
         # Fetch initial data
         from qgis.PyQt.QtGui import QColor
@@ -1618,6 +1707,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch data: {e}")
             return
+
+        # Snapshot the snapped point if available
+        if 'point' in data:
+            from qgis.core import QgsPointXY
+            px, py = data['point']
+            point = QgsPointXY(px, py)
 
         win = TimeSeriesPlotWindow(
             data, var_name, parent=self.iface.mainWindow(),
@@ -1640,14 +1735,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Signals
         win.variable_changed.connect(lambda id, v: self.update_ts_list_item(id))
+        win.variable_changed.connect(lambda id, v: self.sync_ts_on_cross_sections())
         win.layers_changed.connect(lambda id, l: self.save_state_to_project())
+        win.layers_changed.connect(lambda id, l: self.sync_ts_on_cross_sections())
         # Removing win.closed connection to remove_time_series_by_id 
         # so closing the pane doesn't remove it from the list.
         # Change visibility to Bottom pane as requested
         self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, win)
         
         # Add to list
-        item = QtWidgets.QListWidgetItem(f"P{ts_label}: {var_name}")
+        item = QtWidgets.QListWidgetItem(f"{ts_label}: {var_name}")
         item.setData(QtCore.Qt.UserRole, item_id)
         self.ts_list.addItem(item)
         self.ts_list.setCurrentItem(item)
@@ -1665,7 +1762,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             for i in range(self.ts_list.count()):
                 item = self.ts_list.item(i)
                 if item.data(QtCore.Qt.UserRole) == item_id:
-                    item.setText(f"P{win.label}: {win.current_var}")
+                    item.setText(f"{win.label}: {win.current_var}")
                     break
         self.save_state_to_project()
 
@@ -1698,6 +1795,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.active_ts_id = None
             if hasattr(self, 'ts_tool'):
                 self.ts_tool.set_point(None)
+        
+        self.sync_ts_on_cross_sections()
                 
         self.save_state_to_project()
         self.update_ui_state()

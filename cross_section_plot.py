@@ -115,6 +115,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     cursor_left = QtCore.pyqtSignal()
     range_changed = QtCore.pyqtSignal()
     settings_changed = QtCore.pyqtSignal()
+    sigPointPicked = QtCore.pyqtSignal(object) # Emit QgsPointXY
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
                  item_id=None, all_vars=None, head_vars=None, data_fetcher=None, label="A", points=None,
                  z_range=None, x_range=None, v_range=None, show_layers=True, show_cells=False, show_layer_names=False,
@@ -229,8 +230,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # Store data for re-rendering
         self.colorbar = None
         self.vertex_lines = []
-        self.label_items = []
         self.vertex_distances = vertex_distances
+        self.ts_sync_markers = [] # Tracking for TS location markers
         
         # Plot Widget
         self.plot_widget = pg.PlotWidget()
@@ -605,6 +606,10 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.info_label.setText(
                 f"X: {cx:.1f}, Y: {cy:.1f}, Layer: {layer_name}, {cell_id_str}Value: {val_str}"
             )
+            
+            # Emit signal with world point
+            from qgis.core import QgsPointXY
+            self.sigPointPicked.emit(QgsPointXY(cx, cy))
         else:
             self.info_label.setText("No cell at click location")
 
@@ -643,6 +648,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             
         # Clear previous items
         self.plot_widget.clear()
+        self.ts_sync_markers = []
         if self.colorbar:
             self.plot_widget.plotItem.layout.removeItem(self.colorbar)
             self.colorbar = None
@@ -933,6 +939,24 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                         labels.append("")
                 return labels
             axis.tickStrings = log_formatter
+
+    def clear_ts_sync_markers(self):
+        """Removes all blue cross markers from the plot."""
+        for m in self.ts_sync_markers:
+            self.plot_widget.removeItem(m)
+        self.ts_sync_markers = []
+
+    def add_ts_sync_marker(self, x, y):
+        """Adds a blue cross marker to the plot."""
+        marker = pg.ScatterPlotItem(
+            [x], [y], 
+            symbol='x', 
+            size=12, 
+            pen=pg.mkPen('b', width=3),
+            brush=None
+        )
+        self.plot_widget.addItem(marker)
+        self.ts_sync_markers.append(marker)
 
 
 class CrossSectionMeshItem(pg.GraphicsObject):

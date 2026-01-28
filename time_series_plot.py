@@ -42,6 +42,12 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
             self.var_combo.setCurrentText(self.current_var)
         self.var_combo.currentTextChanged.connect(self.change_variable)
         tools_layout.addWidget(self.var_combo)
+        
+        self.btn_toggle_layers = QtWidgets.QPushButton("Layers >>")
+        self.btn_toggle_layers.setCheckable(True)
+        self.btn_toggle_layers.clicked.connect(self.toggle_layers_panel)
+        tools_layout.addWidget(self.btn_toggle_layers)
+        
         tools_layout.addStretch()
         left_layout.addLayout(tools_layout)
         
@@ -97,11 +103,20 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
             
         # Hide layer panel if variable has no layer dimension
         has_layers = self.data.get('has_layers', True)
-        self.layer_panel.setVisible(has_layers)
+        if not has_layers:
+            self.layer_panel.setVisible(False)
+            self.btn_toggle_layers.setVisible(False)
+        else:
+            self.btn_toggle_layers.setVisible(True)
+            self.layer_panel.setVisible(self.btn_toggle_layers.isChecked())
         
         if 'layer_names' not in self.data:
             return
             
+        # Select all by default if no selection exists
+        if not self.layer_indices:
+            self.layer_indices = list(range(len(self.data['layer_names'])))
+
         self.layer_list.blockSignals(True)
         self.layer_list.clear()
         for i, name in enumerate(self.data['layer_names']):
@@ -241,6 +256,10 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
                 txt += f" icell2d: {ci}"
         
         self.info_label.setText(txt)
+
+    def toggle_layers_panel(self, checked):
+        self.layer_panel.setVisible(checked)
+        self.btn_toggle_layers.setText("Layers <<" if checked else "Layers >>")
 
     def closeEvent(self, event):
         self.closed.emit(self.item_id)

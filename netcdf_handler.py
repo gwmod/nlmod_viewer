@@ -1148,6 +1148,9 @@ class NetcdfHandler:
                 # Check if within cell bounds (with small margin)
                 if np.abs(x_vals[c] - mx) <= dx * 0.501 and np.abs(y_vals[r] - my) <= dy * 0.501:
                     cell_idx = (r, c)
+                    # Snap to cell center in model space
+                    mx_snapped, my_snapped = x_vals[c], y_vals[r]
+                    wx, wy = self.transform_model_to_world(mx_snapped, my_snapped)
         else:
             # Vertex grid - use spatial index
             if 'strtree' not in self._cache:
@@ -1176,6 +1179,9 @@ class NetcdfHandler:
                 if len(res) > 0:
                     idx_in_tree = res[0]
                     cell_idx = self._cache['poly_indices'][idx_in_tree]
+                    # Snap to cell center - we already have world space centroids
+                    xc_all, yc_all = self._get_centroids()
+                    wx, wy = xc_all[cell_idx], yc_all[cell_idx]
         
         if cell_idx is None:
             return {"error": "No cell found at this location."}
