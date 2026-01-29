@@ -11,8 +11,20 @@ A QGIS plugin for inspecting input and output of groundwater models built with [
   - Structured grids: Load as raster layers with automatic pseudocolor styling
   - Vertex grids: Load as mesh layers via MDAL
 - **CRS Handling**: Defaults to Dutch coordinate system (EPSG:28992) when CRS is not specified
-- **Cross-Section Tool**: Draw lines on the map to plot cross-sections of model data
-- **Variable Inspector**: Browse and select from available model variables (head, conductivity, etc.)
+- **Cross-Section Tool**: Draw lines on the map to plot high-quality cross-sections with interactive cell inspection
+- **Time Series Tool**: Place points on the map or cross-sections to generate dynamic time-series plots
+- **Variable Inspector**: Browse and select from available model variables (head, conductivity, etc.) with metadata display
+- **Project Integrated**: All settings (NetCDF path, cross-sections, time-series) are saved directly in your QGIS project file
+
+## State Persistence
+
+The NLMOD Inspector is designed to be fully integrated with your workflow. **The following information is automatically stored within your QGIS project file (`.qgs` or `.qgz`):**
+
+- The absolute path to the **loaded NetCDF file**.
+- All **Cross-Section lines**, their names, and their individual plot settings (Z-ranges, colormaps, etc.).
+- All **Time Series points**, their labels, and their selected layer indices.
+
+This means when you save your QGIS project and reopen it later, your entire analysis setup—including all open plot windows and their specific configurations—will be restored exactly as you left it.
 
 ## Installation
 
