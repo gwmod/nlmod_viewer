@@ -250,7 +250,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         ts_btn_layout = QtWidgets.QHBoxLayout()
         self.btn_add_ts = QtWidgets.QPushButton("Add")
-        self.btn_add_ts.clicked.connect(self.activate_point_tool)
+        self.btn_add_ts.clicked.connect(lambda: self.activate_point_tool(can_add=True))
         ts_btn_layout.addWidget(self.btn_add_ts)
         
         self.btn_remove_ts = QtWidgets.QPushButton("Remove")
@@ -379,6 +379,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # Dimension Presence Flags
             item.setData(QtCore.Qt.UserRole + 1, v.get('layer_size', 0) > 0)
             item.setData(QtCore.Qt.UserRole + 2, v.get('time_size', 0) > 0)
+            item.setData(QtCore.Qt.UserRole + 3, v.get('has_spatial', False))
             
             self.var_list.addItem(item)
     
@@ -394,11 +395,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         item = selected_items[0]
         has_layers = item.data(QtCore.Qt.UserRole + 1)
         has_times = item.data(QtCore.Qt.UserRole + 2)
+        has_spatial = item.data(QtCore.Qt.UserRole + 3)
         
         self.layer_combo.setEnabled(has_layers)
         self.time_slider.setEnabled(has_times)
+        self.load_btn.setEnabled(has_spatial)
 
-        if self.auto_update_var:
+        if self.auto_update_var and has_spatial:
             self.add_layer()
 
     def get_vars_3d(self):
@@ -495,20 +498,26 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         use_mesh = (grid_type == "vertex")
         
         # Determine Layer name for legend
-        if params:
-            if self.layer_combo.count() > layer_idx:
-                layer_val = self.layer_combo.itemText(layer_idx)
-            else:
-                layer_val = str(layer_idx + 1)
-            time_val = self.time_values[time_idx] if (0 <= time_idx < len(self.time_values)) else ""
-        else:
-            layer_val = self.layer_combo.currentText() if self.layer_combo.isEnabled() else "1"
-            time_val = self.time_values[time_idx] if (self.time_slider.isEnabled() and self.time_values) else ""
+        layer_suffix = ""
+        time_suffix = ""
         
-        display_name = f"{var_name}"
-        if layer_val: display_name += f" ({layer_val})"
-        if time_val: display_name += f" [{time_val}]"
-        display_name += f" @ {base_name}"
+        if params:
+            if self.layer_combo.isEnabled() or self.layer_combo.count() > 0:
+                if self.layer_combo.count() > layer_idx:
+                    layer_suffix = f" ({self.layer_combo.itemText(layer_idx)})"
+                else:
+                    layer_suffix = f" ({layer_idx + 1})"
+            
+            if self.time_slider.isEnabled() and (0 <= time_idx < len(self.time_values)):
+                time_suffix = f" [{self.time_values[time_idx]}]"
+        else:
+            if self.layer_combo.isEnabled():
+                layer_suffix = f" ({self.layer_combo.currentText()})"
+            
+            if self.time_slider.isEnabled() and self.time_values:
+                time_suffix = f" [{self.time_values[time_idx]}]"
+        
+        display_name = f"{var_name}{layer_suffix}{time_suffix} @ {base_name}"
         
         # Get consistent CRS from handler or default to RD New
         crs_def = self.handler.get_crs()
@@ -1057,6 +1066,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         return self.xs_tool
 
     def activate_cross_section_tool(self):
+        # Clear TS selection/tool state
+        if self.active_ts_id is not None:
+            self.active_ts_id = None
+            if hasattr(self, 'ts_tool'):
+                self.ts_tool.set_point(None)
+                self.ts_tool.can_add = False
+
         # 1. Automatic variable selection if none is picked
         selected_items = self.var_list.selectedItems()
         if not selected_items and self.handler and self.handler.ds:
@@ -1502,7 +1518,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if item_id in self.ts_points:
                 # Automatically activate/initialize tool for dragging if not active
                 if self.iface.mapCanvas().mapTool() != getattr(self, 'ts_tool', None):
-                    self.activate_point_tool()
+                    self.activate_point_tool(can_add=False)
                 
                 # Update the tool's marker position
                 if hasattr(self, 'ts_tool') and self.ts_tool:
@@ -1613,16 +1629,55 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 break
         
         self.sync_ts_on_cross_sections()
-    def activate_point_tool(self):
+    def activate_point_tool(self, can_add=False):
         if not self.handler:
             QtWidgets.QMessageBox.warning(self, "Warning", "Please open a NetCDF file first.")
             return
+
+        if can_add:
+            selected_items = self.var_list.selectedItems()
+            
+            # Automatic variable selection if none is picked
+            if not selected_items and self.handler and self.handler.ds:
+                found_idx = -1
+                for i in range(self.var_list.count()):
+                    v_name = self.var_list.item(i).data(QtCore.Qt.UserRole)
+                    if v_name in self.handler.ds.variables:
+                        v_dims = [d.lower() for d in self.handler.ds.variables[v_name].dimensions]
+                        if 'time' in v_dims and ('icell2d' in v_dims or ('x' in v_dims and 'y' in v_dims)):
+                            found_idx = i
+                            break
+                if found_idx != -1:
+                    self.var_list.setCurrentRow(found_idx)
+                    selected_items = self.var_list.selectedItems()
+
+            if not selected_items:
+                QtWidgets.QMessageBox.information(self, "Info", "Please select a variable with time and spatial dimensions first.")
+                return
+            
+            var_name = selected_items[0].data(QtCore.Qt.UserRole)
+            if self.handler and self.handler.ds:
+                var = self.handler.ds.variables[var_name]
+                dims_lower = [d.lower() for d in var.dimensions]
+                
+                has_time = any(d in {'time'} for d in dims_lower)
+                has_spatial = 'icell2d' in dims_lower or ('x' in dims_lower and 'y' in dims_lower)
+                
+                if not has_time or not has_spatial:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Invalid Variable",
+                        f"Variable '{var_name}' is not compatible for time series plotting.\n\n"
+                        "Requirement: Must have both a 'time' and a spatial dimension ('icell2d' or 'x' and 'y')."
+                    )
+                    return
 
         if not hasattr(self, 'ts_tool') or not self.ts_tool:
             self.ts_tool = TimeSeriesMapTool(self.iface.mapCanvas())
             self.ts_tool.point_clicked.connect(self.on_point_picked)
             self.ts_tool.point_moved.connect(self.on_point_moved)
 
+        self.ts_tool.can_add = can_add
         curr_tool = self.iface.mapCanvas().mapTool()
         if curr_tool != self.ts_tool:
             self.prev_map_tool = curr_tool
@@ -1630,6 +1685,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.iface.mapCanvas().setMapTool(self.ts_tool)
 
     def on_point_picked(self, point):
+        # Disable add mode after one pick
+        if hasattr(self, 'ts_tool'):
+            self.ts_tool.can_add = False
+            
         # Create a new Time Series
         win = self.add_time_series_plot(point)
         if not win and hasattr(self, 'ts_tool') and self.ts_tool:
@@ -1668,10 +1727,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
     def on_cs_point_picked(self, point):
         """Called when a point is clicked in a cross-section plot."""
-        # Only act if we are currently in "Add Time Series" mode or TS tool is active
         if hasattr(self, 'ts_tool') and self.iface.mapCanvas().mapTool() == self.ts_tool:
-            # If we are NOT dragging an existing point, treat this as a new point pick
-            if not self.ts_tool.is_dragging:
+            if self.ts_tool.can_add:
                 self.on_point_picked(point)
 
     def add_time_series_plot(self, point, var_name=None, ts_label=None, item_id=None, layer_indices=None):

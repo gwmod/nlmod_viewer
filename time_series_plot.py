@@ -57,7 +57,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         left_layout.addWidget(self.info_label)
         
         # Plot
-        self.plot_widget = pg.PlotWidget()
+        self.plot_widget = pg.PlotWidget(axisItems={'bottom': pg.DateAxisItem()})
         self.plot_widget.setBackground('w')
         self.plot_widget.showGrid(x=True, y=True)
         self.plot_widget.getPlotItem().getAxis('left').setPen('k')
@@ -183,12 +183,16 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
             return
             
         times = self.data['times']
+        time_stamps = self.data.get('time_stamps', [])
         unit = self.data.get('unit', '')
         label_text = f"{self.current_var} ({unit})" if unit else self.current_var
         self.plot_widget.setLabel('left', label_text)
-        self.plot_widget.setLabel('bottom', 'Time step')
+        self.plot_widget.setLabel('bottom', 'Date/Time')
         
-        x = np.arange(len(times))
+        if time_stamps:
+            x = np.array(time_stamps)
+        else:
+            x = np.arange(len(times))
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
         has_layers = self.data.get('has_layers', True)
@@ -219,12 +223,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
                 else:
                     self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), connect="finite")
         
-        if times:
-            ax = self.plot_widget.getAxis('bottom')
-            # Only show subset of ticks if many
-            step = max(1, len(times) // 10)
-            ticks = [list(enumerate(times))[::step]]
-            ax.setTicks(ticks)
+        # DateAxisItem handles ticks automatically
 
     def refresh(self, all_vars=None):
         """Updates available variables and reloads data."""

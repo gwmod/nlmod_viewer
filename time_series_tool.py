@@ -13,6 +13,7 @@ class TimeSeriesMapTool(QgsMapTool):
         self.marker = None
         self.point = None
         self.is_dragging = False
+        self.can_add = False # If true, click adds new point. If false, only drag existing.
 
     def set_point(self, point):
         self.point = point
@@ -40,7 +41,7 @@ class TimeSeriesMapTool(QgsMapTool):
         if e.button() == Qt.LeftButton:
             if self.point and self.is_close(point, self.point):
                 self.is_dragging = True
-            else:
+            elif self.can_add:
                 self.point = point
                 self.refresh_display()
                 self.point_clicked.emit(self.point)

@@ -230,19 +230,25 @@ class NetcdfHandler:
             
         vars_with_time = []
         possible_times = {'time'}
+        spatial_dims_vertex = {'icell2d'}
+        spatial_dims_structured = {'x', 'y'}
         
         for name, var in self.ds.variables.items():
             # Skip coordinate variables themselves
-            if name.lower() in possible_times:
+            if name.lower() in possible_times or name.lower() in spatial_dims_vertex or name.lower() in spatial_dims_structured:
                 continue
                 
-            has_time = False
-            for d in var.dimensions:
-                if d.lower() in possible_times:
-                    has_time = True
-                    break
+            dims_lower = [d.lower() for d in var.dimensions]
+            has_time = any(d in possible_times for d in dims_lower)
             
-            if has_time:
+            # Check spatial dimensions
+            has_spatial = False
+            if 'icell2d' in dims_lower:
+                has_spatial = True
+            elif 'x' in dims_lower and 'y' in dims_lower:
+                has_spatial = True
+            
+            if has_time and has_spatial:
                 vars_with_time.append(name)
                 
         return sorted(vars_with_time)
@@ -284,10 +290,11 @@ class NetcdfHandler:
     def get_dimensions_metadata(self):
         """Returns metadata for all available dimensions (layers, times) in the file."""
         if not self.ds:
-            return {"layers": [], "times": []}
+            return {"layers": [], "times": [], "time_stamps": []}
             
         layers = []
         times = []
+        time_stamps = []
         
         possible_layers = {'layer', 'z'}
         possible_times = {'time'}
@@ -309,25 +316,44 @@ class NetcdfHandler:
                     try:
                         import netCDF4
                         import numpy as np
+                        from datetime import datetime
                         if hasattr(t_var, 'units'):
                             cal = getattr(t_var, 'calendar', 'standard')
                             dates = netCDF4.num2date(vals, units=t_var.units, calendar=cal)
+                            
                             def fmt(dt):
                                 if hasattr(dt, 'strftime'):
                                     return dt.strftime('%Y-%m-%d %H:%M:%S') if dt.hour or dt.minute else dt.strftime('%Y-%m-%d')
                                 return str(dt)
+                                
+                            def to_ts(dt):
+                                try:
+                                    if hasattr(dt, 'timestamp'):
+                                        return dt.timestamp()
+                                    # Fallback for cftime
+                                    d_dt = datetime(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+                                    return d_dt.timestamp()
+                                except:
+                                    return 0.0
+
                             if isinstance(dates, (list, np.ndarray)):
                                 times = [fmt(dt) for dt in dates]
+                                time_stamps = [to_ts(dt) for dt in dates]
                             else:
                                 times = [fmt(dates)]
+                                time_stamps = [to_ts(dates)]
                         else:
                             times = [str(v) for v in vals]
+                            time_stamps = [float(v) for v in vals]
                     except:
                         times = [str(v) for v in vals]
+                        time_stamps = [float(v) for v in vals]
                 if not times:
-                    times = [str(i+1) for i in range(self.ds.dimensions[d].size)]
+                    size = self.ds.dimensions[d].size
+                    times = [str(i+1) for i in range(size)]
+                    time_stamps = [float(i) for i in range(size)]
                     
-        return {"layers": layers, "times": times}
+        return {"layers": layers, "times": times, "time_stamps": time_stamps}
 
     def get_variables(self):
         """Returns list of variables that are likely model data (skipping coords)."""
@@ -413,6 +439,10 @@ class NetcdfHandler:
                          time_values = [str(i+1) for i in range(size)]
                     time_size = len(time_values)
 
+            # Detect spatial dims
+            dims_lower = [d.lower() for d in var.dimensions]
+            has_spatial = 'icell2d' in dims_lower or ('x' in dims_lower and 'y' in dims_lower)
+
             data_vars.append({
                 'name': name,
                 'description': desc,
@@ -423,7 +453,8 @@ class NetcdfHandler:
                 'layer_values': layer_values,
                 'time_dim': time_dim,
                 'time_size': time_size,
-                'time_values': time_values
+                'time_values': time_values,
+                'has_spatial': has_spatial
             })
         return data_vars
 
@@ -1213,12 +1244,14 @@ class NetcdfHandler:
         # Retrieve all times once
         dim_meta = self.get_dimensions_metadata()
         time_values = dim_meta['times']
+        time_stamps = dim_meta.get('time_stamps', [])
         layer_names = dim_meta['layers']
         
         unit = getattr(var, 'units', '')
         
         results = {
             'times': time_values, 
+            'time_stamps': time_stamps,
             'values': {}, 
             'layer_names': layer_names,
             'var_name': var_name,
