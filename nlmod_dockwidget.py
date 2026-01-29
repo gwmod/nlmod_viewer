@@ -1584,14 +1584,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     x_mid = (dists[m_idx] + dists[m_idx+1]) / 2.0
                     
                     # For each selected layer in TS
-                    for lyr_idx in ts_win.layer_indices:
+                    for i, lyr_idx in enumerate(ts_win.layer_indices):
                         if lyr_idx < rendered_botm.shape[0]:
                             l_top = rendered_top[m_idx] if lyr_idx == 0 else rendered_botm[lyr_idx-1, m_idx]
                             l_bot = rendered_botm[lyr_idx, m_idx]
                             
                             if not np.isnan(l_top) and not np.isnan(l_bot):
                                 y_mid = (l_top + l_bot) / 2.0
-                                cs_win.add_ts_sync_marker(x_mid, y_mid)
+                                # Use the same color as the TS plot
+                                color = TimeSeriesPlotWindow.COLORS[i % len(TimeSeriesPlotWindow.COLORS)]
+                                cs_win.add_ts_sync_marker(x_mid, y_mid, color=color)
 
     def remove_cross_section_by_id(self, item_id):
         """Cleanup when plot window is closed directly or removed from list."""

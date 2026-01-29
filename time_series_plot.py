@@ -3,10 +3,12 @@ import pyqtgraph as pg
 import numpy as np
 
 class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
-    variable_changed = QtCore.pyqtSignal(str, str) # item_id, new_var_name
-    layers_changed = QtCore.pyqtSignal(str, list) # item_id, layer_indices
-    closed = QtCore.pyqtSignal(str) # item_id
-    
+    variable_changed = QtCore.pyqtSignal(str, str) # item_id, variable_name
+    layers_changed = QtCore.pyqtSignal(str, list)   # item_id, layers
+    closed = QtCore.pyqtSignal(str)                # item_id
+
+    COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+
     def __init__(self, data, variable_name, parent=None, item_id=None, 
                  all_vars=None, data_fetcher=None, label="1", point=None,
                  layer_indices=None):
@@ -193,7 +195,8 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
             x = np.array(time_stamps)
         else:
             x = np.arange(len(times))
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        colors = self.COLORS
 
         has_layers = self.data.get('has_layers', True)
         
