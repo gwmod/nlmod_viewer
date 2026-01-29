@@ -5,13 +5,14 @@ import numpy as np
 class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
     variable_changed = QtCore.pyqtSignal(str, str) # item_id, variable_name
     layers_changed = QtCore.pyqtSignal(str, list)   # item_id, layers
+    marker_changed = QtCore.pyqtSignal(str, str)    # item_id, marker_type
     closed = QtCore.pyqtSignal(str)                # item_id
 
     COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
     def __init__(self, data, variable_name, parent=None, item_id=None, 
                  all_vars=None, data_fetcher=None, label="1", point=None,
-                 layer_indices=None):
+                 layer_indices=None, marker_type='x'):
         super().__init__(parent)
         self.item_id = item_id
         self.data = data
@@ -21,6 +22,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         self.label = label
         self.point = point
         self.layer_indices = layer_indices or [0]
+        self.marker_type = marker_type
         
         self.setWindowTitle(f"Time Series {label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -49,6 +51,12 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         self.btn_toggle_layers.setCheckable(True)
         self.btn_toggle_layers.clicked.connect(self.toggle_layers_panel)
         tools_layout.addWidget(self.btn_toggle_layers)
+
+        self.btn_settings = QtWidgets.QPushButton()
+        self.btn_settings.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        self.btn_settings.setToolTip("Settings")
+        self.btn_settings.clicked.connect(self.show_settings_menu)
+        tools_layout.addWidget(self.btn_settings)
         
         tools_layout.addStretch()
         left_layout.addLayout(tools_layout)
@@ -178,6 +186,35 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
                 self.update_info_label()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch data: {e}")
+
+    def show_settings_menu(self):
+        menu = QtWidgets.QMenu(self)
+        
+        # Marker Type Submenu
+        marker_menu = menu.addMenu("Map Marker")
+        
+        types = [
+            ("X (x)", "x"),
+            ("Cross (+)", "cross"),
+            ("Box (□)", "box"),
+            ("Circle (○)", "circle"),
+            ("Triangle (△)", "triangle")
+        ]
+        
+        group = QtWidgets.QActionGroup(self)
+        for label, value in types:
+            action = marker_menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(value)
+            action.setChecked(self.marker_type == value)
+            group.addAction(action)
+            action.triggered.connect(lambda _, v=value: self.set_marker_type(v))
+            
+        menu.exec_(self.btn_settings.mapToGlobal(self.btn_settings.rect().bottomLeft()))
+
+    def set_marker_type(self, value):
+        self.marker_type = value
+        self.marker_changed.emit(self.item_id, value)
 
     def render_plot(self):
         self.plot_widget.clear()

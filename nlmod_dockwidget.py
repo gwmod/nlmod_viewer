@@ -1593,7 +1593,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                                 y_mid = (l_top + l_bot) / 2.0
                                 # Use the same color as the TS plot
                                 color = TimeSeriesPlotWindow.COLORS[i % len(TimeSeriesPlotWindow.COLORS)]
-                                cs_win.add_ts_sync_marker(x_mid, y_mid, color=color)
+                                cs_win.add_ts_sync_marker(x_mid, y_mid, color=color, marker_type=ts_win.marker_type)
 
     def remove_cross_section_by_id(self, item_id):
         """Cleanup when plot window is closed directly or removed from list."""
@@ -1733,7 +1733,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if self.ts_tool.can_add:
                 self.on_point_picked(point)
 
-    def add_time_series_plot(self, point, var_name=None, ts_label=None, item_id=None, layer_indices=None):
+    def add_time_series_plot(self, point, var_name=None, ts_label=None, item_id=None, layer_indices=None, marker_type='x'):
         if not self.handler: return
         
         if not var_name:
@@ -1777,7 +1777,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             data, var_name, parent=self.iface.mainWindow(),
             item_id=item_id, all_vars=self.get_vars_with_time(),
             data_fetcher=self.handler.get_timeseries_data,
-            label=ts_label, point=point, layer_indices=layer_indices
+            label=ts_label, point=point, layer_indices=layer_indices,
+            marker_type=marker_type
         )
         
         self.ts_windows[item_id] = win
@@ -1787,7 +1788,22 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         marker = QgsVertexMarker(self.iface.mapCanvas())
         marker.setCenter(point)
         marker.setColor(QColor(0, 0, 255))
-        marker.setIconType(QgsVertexMarker.ICON_X)
+        
+        if marker_type == 'cross':
+            marker.setIconType(QgsVertexMarker.ICON_CROSS)
+        elif marker_type == 'box':
+            marker.setIconType(QgsVertexMarker.ICON_BOX)
+        elif marker_type == 'circle':
+            marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+        elif marker_type == 'triangle':
+             # QGIS 3.24+
+             if hasattr(QgsVertexMarker, 'ICON_TRIANGLE'):
+                 marker.setIconType(QgsVertexMarker.ICON_TRIANGLE)
+             else:
+                 marker.setIconType(QgsVertexMarker.ICON_BOX) # Fallback
+        else:
+            marker.setIconType(QgsVertexMarker.ICON_X)
+
         marker.setPenWidth(2)
         marker.setIconSize(10)
         self.ts_markers[item_id] = marker
@@ -1795,6 +1811,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Signals
         win.variable_changed.connect(lambda id, v: self.update_ts_list_item(id))
         win.variable_changed.connect(lambda id, v: self.sync_ts_on_cross_sections())
+        win.marker_changed.connect(self.update_ts_marker)
         win.layers_changed.connect(lambda id, l: self.save_state_to_project())
         win.layers_changed.connect(lambda id, l: self.sync_ts_on_cross_sections())
         # Removing win.closed connection to remove_time_series_by_id 
@@ -1824,6 +1841,32 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     item.setText(f"{win.label}: {win.current_var}")
                     break
         self.save_state_to_project()
+
+    def update_ts_marker(self, item_id, marker_type):
+        from qgis.gui import QgsVertexMarker
+        
+        if item_id not in self.ts_markers:
+            return
+            
+        marker = self.ts_markers[item_id]
+        
+        if marker_type == 'cross':
+            marker.setIconType(QgsVertexMarker.ICON_CROSS)
+        elif marker_type == 'box':
+            marker.setIconType(QgsVertexMarker.ICON_BOX)
+        elif marker_type == 'circle':
+            marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+        elif marker_type == 'triangle':
+             if hasattr(QgsVertexMarker, 'ICON_TRIANGLE'):
+                 marker.setIconType(QgsVertexMarker.ICON_TRIANGLE)
+             else:
+                 marker.setIconType(QgsVertexMarker.ICON_BOX)
+        else:
+            marker.setIconType(QgsVertexMarker.ICON_X)
+            
+        self.iface.mapCanvas().refresh()
+        self.save_state_to_project()
+        self.sync_ts_on_cross_sections()
 
     def remove_time_series(self):
         selected = self.ts_list.selectedItems()
@@ -2187,7 +2230,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 'variable': win.current_var,
                 'point': (float(pt.x()), float(pt.y())),
                 'layer_indices': win.layer_indices,
-                'visible': win.isVisible()
+                'visible': win.isVisible(),
+                'marker': win.marker_type
             })
         QgsProject.instance().writeEntry("NlmodInspector", "time_series", json.dumps(ts_data))
 
@@ -2270,7 +2314,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             ts['variable'], 
                             ts_label=ts['label'], 
                             item_id=ts['id'],
-                            layer_indices=ts.get('layer_indices')
+                            layer_indices=ts.get('layer_indices'),
+                            marker_type=ts.get('marker', 'x')
                         )
                         if win and not ts.get('visible', True):
                             win.hide()

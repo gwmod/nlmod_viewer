@@ -946,11 +946,22 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.plot_widget.removeItem(m)
         self.ts_sync_markers = []
 
-    def add_ts_sync_marker(self, x, y, color='b'):
+    def add_ts_sync_marker(self, x, y, color='b', marker_type='x'):
         """Adds a cross marker to the plot with specified color."""
+        
+        # Map generic types to pyqtgraph symbols
+        symbol_map = {
+            'x': 'x',
+            'cross': '+',
+            'box': 's',
+            'circle': 'o',
+            'triangle': 't1'
+        }
+        symbol = symbol_map.get(marker_type, 'x')
+        
         marker = pg.ScatterPlotItem(
             [x], [y], 
-            symbol='x', 
+            symbol=symbol, 
             size=12, 
             pen=pg.mkPen(color, width=3),
             brush=None
