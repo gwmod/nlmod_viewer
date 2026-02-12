@@ -4,7 +4,7 @@ from qgis.PyQt.QtWidgets import QAction
 from .nlmod_dockwidget import NlmodDockWidget
 import os
 
-class NlmodInspector:
+class NlmodViewer:
     def __init__(self, iface):
         """Constructor."""
         self.iface = iface
@@ -15,12 +15,12 @@ class NlmodInspector:
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         icon_path = os.path.join(self.plugin_dir, 'icons', 'icon.png')
-        self.action = QAction(QIcon(icon_path), "NLMOD Inspector", self.iface.mainWindow())
-        self.action.setToolTip("Inspect NLMOD NetCDF files")
+        self.action = QAction(QIcon(icon_path), "NLMOD Viewer", self.iface.mainWindow())
+        self.action.setToolTip("View NLMOD NetCDF files")
         self.action.triggered.connect(self.run)
         
         # Add to the Plugins menu
-        self.iface.addPluginToMenu("&NLMOD Inspector", self.action)
+        self.iface.addPluginToMenu("&NLMOD Viewer", self.action)
         # Add to the Toolbar
         self.iface.addToolBarIcon(self.action)
 
@@ -48,7 +48,12 @@ class NlmodInspector:
             self.dockwidget.clear_all_cross_sections()
             
         # 1. Read visibility first before any potential overwrites
-        is_open_str, _ = QgsProject.instance().readEntry("NlmodInspector", "is_open", "false")
+        # Try new name first, fallback to old name for backwards compatibility
+        is_open_str, ok = QgsProject.instance().readEntry("NlmodViewer", "is_open", "")
+        if not ok:
+            is_open_str, _ = QgsProject.instance().readEntry("NlmodInspector", "is_open", "false")
+        if not is_open_str:
+            is_open_str = "false"
         
         # 2. Ensure dock exists and restore its data
         self.create_dock()
@@ -68,7 +73,7 @@ class NlmodInspector:
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
-        self.iface.removePluginMenu("&NLMOD Inspector", self.action)
+        self.iface.removePluginMenu("&NLMOD Viewer", self.action)
         self.iface.removeToolBarIcon(self.action)
         if self.dockwidget:
             self.iface.removeDockWidget(self.dockwidget)

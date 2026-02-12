@@ -1,3 +1,3 @@
 def classFactory(iface):
-    from .nlmod_inspector import NlmodInspector
-    return NlmodInspector(iface)
+    from .nlmod_viewer import NlmodViewer
+    return NlmodViewer(iface)

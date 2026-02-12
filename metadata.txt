@@ -1,13 +1,13 @@
 [general]
-name=NLMOD Inspector
+name=NLMOD Viewer
 qgisMinimumVersion=3.0
 description=Inspect input and output of groundwater models built with nlmod (NetCDF).
 version=0.1
 author=Artesia
 email=r.calje@artesia-water.nl
-about=A plugin to read generic and nlmod-specific NetCDF files to inspect groundwater model data (structured and vertex grids).
-tracker=https://github.com/gwmod/NlmodInspector/issues
-repository=https://github.com/gwmod/NlmodInspector/
+about=A plugin to read nlmod-specific NetCDF files to inspect groundwater model data (structured and vertex grids).
+tracker=https://github.com/gwmod/nlmod_viewer/issues
+repository=https://github.com/gwmod/nlmod_viewer/
 icon=icons/icon.png
 category=Plugins
 changelog=

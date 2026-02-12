@@ -1,4 +1,4 @@
-# NLMOD Inspector
+# NLMOD Viewer
 
 A QGIS plugin for inspecting input and output of groundwater models built with [nlmod](https://nlmod.readthedocs.io). This plugin reads NetCDF files containing groundwater model data and visualizes them in QGIS, supporting both structured and vertex (quadtree/unstructured) grids.
 
@@ -18,7 +18,7 @@ A QGIS plugin for inspecting input and output of groundwater models built with [
 
 ## State Persistence
 
-The NLMOD Inspector is designed to be fully integrated with your workflow. **The following information is automatically stored within your QGIS project file (`.qgs` or `.qgz`):**
+The NLMOD Viewer is designed to be fully integrated with your workflow. **The following information is automatically stored within your QGIS project file (`.qgs` or `.qgz`):**
 
 - The absolute path to the **loaded NetCDF file**.
 - All **Cross-Section lines**, their names, and their individual plot settings (Z-ranges, colormaps, etc.).
@@ -31,7 +31,7 @@ This means when you save your QGIS project and reopen it later, your entire anal
 ### From Source
 
 1. Clone or download this repository
-2. Copy the `NlmodInspector` folder to your QGIS plugins directory:
+2. Copy the `nlmod_viewer` folder to your QGIS plugins directory:
    - **Windows**: `C:\Users\<YourUser>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
    - **Linux/Mac**: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/`
 3. Restart QGIS
@@ -51,7 +51,7 @@ This means when you save your QGIS project and reopen it later, your entire anal
 
 ### Map Layer Visualization
 
-1. Click the **NLMOD Inspector** icon in the toolbar or select it from the Plugins menu.
+1. Click the **NLMOD Viewer** icon in the toolbar or select it from the Plugins menu.
 2. A dock widget will appear on the left side.
 3. Click **Browse...** to select your NetCDF file (`.nc`, `.nc4`, or `.hdf5`).
 4. The plugin will display file metadata and grid type.
@@ -97,7 +97,7 @@ Manage cross-sections using the dedicated group at the bottom of the dock widget
 
 ### Project Structure
 ```
-NlmodInspector/
+nlmod_viewer/
 ├── __init__.py              # Plugin entry point
 ├── nlmod_inspector.py       # Main plugin class
 ├── nlmod_dockwidget.py      # UI dock widget

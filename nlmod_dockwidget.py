@@ -124,7 +124,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None, iface=None):
         super(NlmodDockWidget, self).__init__(parent)
         self.iface = iface # Store iface reference
-        self.setWindowTitle("NLMOD Inspector")
+        self.setWindowTitle("NLMOD Viewer")
         self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
         
         # Main Widget & Layout
@@ -545,17 +545,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not existing_layer and not force_new:
             for layer_id, layer in QgsProject.instance().mapLayers().items():
                 if use_mesh and isinstance(layer, QgsMeshLayer):
-                    # Check if this layer was created by our plugin for this file
-                    if layer.customProperty("nlmod_inspector_source") == filepath:
+                    # Check if this layer was created by our plugin for this file (check both new and old keys)
+                    source = layer.customProperty("nlmod_viewer_source") or layer.customProperty("nlmod_inspector_source")
+                    if source == filepath:
                         # If we are restoring, we might want to match the exact variable too
-                        if params and layer.customProperty("nlmod_inspector_var") != var_name:
+                        var = layer.customProperty("nlmod_viewer_var") or layer.customProperty("nlmod_inspector_var")
+                        if params and var != var_name:
                             continue
                         existing_layer = layer
                         self.active_map_layer = layer
                         break
                 elif not use_mesh and isinstance(layer, QgsRasterLayer):
-                    if layer.customProperty("nlmod_inspector_source") == filepath:
-                        if params and layer.customProperty("nlmod_inspector_var") != var_name:
+                    source = layer.customProperty("nlmod_viewer_source") or layer.customProperty("nlmod_inspector_source")
+                    if source == filepath:
+                        var = layer.customProperty("nlmod_viewer_var") or layer.customProperty("nlmod_inspector_var")
+                        if params and var != var_name:
                             continue
                         existing_layer = layer
                         self.active_map_layer = layer
@@ -662,11 +666,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QgsProject.instance().addMapLayer(layer, False)  # False = don't add to legend yet
                 
                 # Mark this layer as managed by our plugin
-                layer.setCustomProperty("nlmod_inspector_source", filepath)
-                layer.setCustomProperty("nlmod_inspector_managed", True)
-                layer.setCustomProperty("nlmod_inspector_var", var_name)
-                layer.setCustomProperty("nlmod_inspector_layer_idx", int(layer_idx))
-                layer.setCustomProperty("nlmod_inspector_time_idx", int(time_idx))
+                layer.setCustomProperty("nlmod_viewer_source", filepath)
+                layer.setCustomProperty("nlmod_viewer_managed", True)
+                layer.setCustomProperty("nlmod_viewer_var", var_name)
+                layer.setCustomProperty("nlmod_viewer_layer_idx", int(layer_idx))
+                layer.setCustomProperty("nlmod_viewer_time_idx", int(time_idx))
                 
                 # Add to layer tree at the preserved position
                 layer_tree_root = QgsProject.instance().layerTreeRoot()
@@ -684,7 +688,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
 
         elif grid_type == "structured":
-            QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NlmodInspector", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NLMOD Viewer", Qgis.Info)
             
             # Try loading as Raster (NetCDF)
             safe_path = filepath.replace('\\', '/')
@@ -705,7 +709,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             # GDAL flattens NetCDF dimensions: band_idx = time_idx * n_layers + layer_idx + 1
             band_idx = (time_idx * n_layers) + layer_idx + 1
-            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}] -> band={band_idx}", "NlmodInspector", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}] -> band={band_idx}", "NLMOD Viewer", Qgis.Info)
             
             safe_path = filepath.replace('\\', '/')
             # (Note: display_name is already calculated above)
@@ -749,7 +753,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                                 if y_size > 0:
                                     vrt_xml = vrt_xml.replace('yOff="0"', f'yOff="{y_size}"')
                                     vrt_xml = vrt_xml.replace(f'ySize="{y_size}"', f'ySize="-{y_size}"')
-                                    QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NlmodInspector", Qgis.Info)
+                                    QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NLMOD Viewer", Qgis.Info)
                         else:
                             raise Exception("gdal.Translate failed")
                         ds = None
@@ -766,23 +770,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         with open(vrt_path, "w") as f:
                             f.write(vrt_xml)
                         uri = vrt_path
-                        QgsMessageLog.logMessage(f"NLMOD: Created VRT on disk at {uri}", "NlmodInspector", Qgis.Info)
+                        QgsMessageLog.logMessage(f"NLMOD: Created VRT on disk at {uri}", "NLMOD Viewer", Qgis.Info)
                     except Exception as e:
-                        QgsMessageLog.logMessage(f"NLMOD: Failed to write VRT to disk: {e}. Falling back to vsimem.", "NlmodInspector", Qgis.Warning)
+                        QgsMessageLog.logMessage(f"NLMOD: Failed to write VRT to disk: {e}. Falling back to vsimem.", "NLMOD Viewer", Qgis.Warning)
                         vrt_mem_path = f"/vsimem/nlmod_raster_{id(self)}_{ts}.vrt"
                         gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
                         uri = vrt_mem_path
             except Exception as e:
-                QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NlmodInspector", Qgis.Warning)
+                QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NLMOD Viewer", Qgis.Warning)
 
             # Capture existing style if we want to preserve it
             preserved_raster_renderer = None
             if existing_layer and not self.auto_update_color:
                 try:
                     preserved_raster_renderer = existing_layer.renderer().clone()
-                    QgsMessageLog.logMessage("NLMOD: Preserving raster renderer", "NlmodInspector", Qgis.Info)
+                    QgsMessageLog.logMessage("NLMOD: Preserving raster renderer", "NLMOD Viewer", Qgis.Info)
                 except Exception as e:
-                    QgsMessageLog.logMessage(f"NLMOD: Failed to capture style: {e}", "NlmodInspector", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to capture style: {e}", "NLMOD Viewer", Qgis.Warning)
 
             # Calculate actual min/max for the current selection
             stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
@@ -798,7 +802,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     self.apply_raster_style(existing_layer, band_idx=1, min_val=v_min, max_val=v_max)
                 elif preserved_raster_renderer:
                     existing_layer.setRenderer(preserved_raster_renderer)
-                    QgsMessageLog.logMessage("NLMOD: Restored preserved raster style", "NlmodInspector", Qgis.Info)
+                    QgsMessageLog.logMessage("NLMOD: Restored preserved raster style", "NLMOD Viewer", Qgis.Info)
                 
                 # Re-apply CRS to prevent "invalid projection" warning after setDataSource
                 if not existing_layer.crs().isValid() or existing_layer.crs() != qgs_crs:
@@ -831,11 +835,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     QgsProject.instance().addMapLayer(layer)
                     
                     # Mark this layer as managed by our plugin
-                    layer.setCustomProperty("nlmod_inspector_source", filepath)
-                    layer.setCustomProperty("nlmod_inspector_managed", True)
-                    layer.setCustomProperty("nlmod_inspector_var", var_name)
-                    layer.setCustomProperty("nlmod_inspector_layer_idx", int(layer_idx))
-                    layer.setCustomProperty("nlmod_inspector_time_idx", int(time_idx))
+                    layer.setCustomProperty("nlmod_viewer_source", filepath)
+                    layer.setCustomProperty("nlmod_viewer_managed", True)
+                    layer.setCustomProperty("nlmod_viewer_var", var_name)
+                    layer.setCustomProperty("nlmod_viewer_layer_idx", int(layer_idx))
+                    layer.setCustomProperty("nlmod_viewer_time_idx", int(time_idx))
                     
                     self.active_map_layer = layer
                     self.active_var_name = var_name
@@ -912,7 +916,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if self.iface:
                     self.iface.mapCanvas().refresh()
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Raster styling failed: {e}", "NlmodInspector", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Raster styling failed: {e}", "NLMOD Viewer", Qgis.Warning)
 
     def style_mesh_layer(self, layer, min_val=None, max_val=None, idx=None):
         """Applies the Turbo colormap to a mesh layer's active scalar dataset."""
@@ -1039,7 +1043,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.iface.mapCanvas().refresh()
 
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Mesh styling failed: {e}", "NlmodInspector", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Mesh styling failed: {e}", "NLMOD Viewer", Qgis.Warning)
 
 
     def activate_mesh_dataset(self, layer, var_name):
@@ -1400,7 +1404,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 
             tool.set_points(points)
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Failed to activate edit tool: {e}", "NlmodInspector", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Failed to activate edit tool: {e}", "NLMOD Viewer", Qgis.Warning)
 
     def raise_cross_section_window(self, item):
         item_id = item.data(QtCore.Qt.UserRole)
@@ -2116,7 +2120,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.sync_marker.show()
                 
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Sync marker error: {e}", "NlmodInspector", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Sync marker error: {e}", "NLMOD Viewer", Qgis.Warning)
 
     def on_cs_cursor_left(self):
         if self.sync_marker:
@@ -2174,19 +2178,19 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         import json
         from qgis.core import QgsProject
         filepath = self.file_edit.text()
-        QgsProject.instance().writeEntry("NlmodInspector", "filepath", filepath)
+        QgsProject.instance().writeEntry("NlmodViewer", "filepath", filepath)
         
         is_open = "true" if self.isVisible() else "false"
-        QgsProject.instance().writeEntry("NlmodInspector", "is_open", is_open)
+        QgsProject.instance().writeEntry("NlmodViewer", "is_open", is_open)
         
         # Save current selections
         if self.time_slider.isEnabled():
-            QgsProject.instance().writeEntry("NlmodInspector", "global_time_idx", str(self.time_slider.value()))
+            QgsProject.instance().writeEntry("NlmodViewer", "global_time_idx", str(self.time_slider.value()))
 
-        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_var", "true" if self.auto_update_var else "false")
-        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_layer", "true" if self.auto_update_layer else "false")
-        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_time", "true" if self.auto_update_time else "false")
-        QgsProject.instance().writeEntry("NlmodInspector", "auto_update_color", "true" if self.auto_update_color else "false")
+        QgsProject.instance().writeEntry("NlmodViewer", "auto_update_var", "true" if self.auto_update_var else "false")
+        QgsProject.instance().writeEntry("NlmodViewer", "auto_update_layer", "true" if self.auto_update_layer else "false")
+        QgsProject.instance().writeEntry("NlmodViewer", "auto_update_time", "true" if self.auto_update_time else "false")
+        QgsProject.instance().writeEntry("NlmodViewer", "auto_update_color", "true" if self.auto_update_color else "false")
         
         cs_list = []
         for item_id, points in self.cs_geometries.items():
@@ -2217,7 +2221,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     'invert_cmap': win.invert_cmap
                 })
         
-        QgsProject.instance().writeEntry("NlmodInspector", "cross_sections", json.dumps(cs_list))
+        QgsProject.instance().writeEntry("NlmodViewer", "cross_sections", json.dumps(cs_list))
         
         # Save Time Series
         ts_data = []
@@ -2233,7 +2237,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 'visible': win.isVisible(),
                 'marker': win.marker_type
             })
-        QgsProject.instance().writeEntry("NlmodInspector", "time_series", json.dumps(ts_data))
+        QgsProject.instance().writeEntry("NlmodViewer", "time_series", json.dumps(ts_data))
 
     def restore_state_from_project(self):
         """Restores plugin state from project entries."""
@@ -2243,15 +2247,25 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             import os
             from qgis.core import QgsProject, QgsPointXY, Qgis, QgsMessageLog
             
-            filepath, _ = QgsProject.instance().readEntry("NlmodInspector", "filepath", "")
-            QgsMessageLog.logMessage(f"NLMOD: Restoring filepath: {filepath}", "NlmodInspector", Qgis.Info)
+            # Determine which scope to use (new name first, fallback to old name)
+            scope = "NlmodViewer"
+            _, ok = QgsProject.instance().readEntry(scope, "filepath", "")
+            if not ok:
+                # If path not found in Viewer, check if it exists in Inspector
+                _, ok_old = QgsProject.instance().readEntry("NlmodInspector", "filepath", "")
+                if ok_old:
+                    scope = "NlmodInspector"
+            
+            filepath, _ = QgsProject.instance().readEntry(scope, "filepath", "")
+            QgsMessageLog.logMessage(f"NLMOD: Restoring state from project scope: {scope}", "NLMOD Viewer", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Restoring filepath: {filepath}", "NLMOD Viewer", Qgis.Info)
             
             if filepath and os.path.exists(filepath):
                 self.file_edit.setText(filepath)
                 self.open_netcdf(filepath)
                 
                 # Restore time selection
-                time_str, ok = QgsProject.instance().readEntry("NlmodInspector", "global_time_idx", "0")
+                time_str, ok = QgsProject.instance().readEntry(scope, "global_time_idx", "0")
                 if ok and self.time_slider.isEnabled():
                     try:
                         time_idx = int(time_str)
@@ -2261,17 +2275,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         pass
                 
                 # Restore auto-update settings
-                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_var", "false")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_var", "false")
                 self.auto_update_var = (v == "true")
-                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_layer", "false")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_layer", "false")
                 self.auto_update_layer = (v == "true")
-                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_time", "false")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_time", "false")
                 self.auto_update_time = (v == "true")
-                v, _ = QgsProject.instance().readEntry("NlmodInspector", "auto_update_color", "true")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_color", "true")
                 self.auto_update_color = (v == "true")
                 
-                cs_json, _ = QgsProject.instance().readEntry("NlmodInspector", "cross_sections", "[]")
-                QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NlmodInspector", Qgis.Info)
+                cs_json, _ = QgsProject.instance().readEntry(scope, "cross_sections", "[]")
+                QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NLMOD Viewer", Qgis.Info)
                 
                 try:
                     cs_list = json.loads(cs_json)
@@ -2298,13 +2312,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         if win and cs.get('head_variable'):
                             win.head_combo.setCurrentText(cs['head_variable'])
                 except Exception as e:
-                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NlmodInspector", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NLMOD Viewer", Qgis.Warning)
                 
                 # Restore managed layers
                 self.restore_managed_layers()
                 
                 # Restore Time Series
-                ts_json, _ = QgsProject.instance().readEntry("NlmodInspector", "time_series", "[]")
+                ts_json, _ = QgsProject.instance().readEntry(scope, "time_series", "[]")
                 try:
                     ts_list = json.loads(ts_json)
                     for ts in ts_list:
@@ -2320,11 +2334,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         if win and not ts.get('visible', True):
                             win.hide()
                 except Exception as e:
-                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore time series: {e}", "NlmodInspector", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore time series: {e}", "NLMOD Viewer", Qgis.Warning)
 
             else:
                 if filepath:
-                    QgsMessageLog.logMessage(f"NLMOD: Saved filepath does not exist: {filepath}", "NlmodInspector", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Saved filepath does not exist: {filepath}", "NLMOD Viewer", Qgis.Warning)
         finally:
             self.is_restoring = False
             # Now safe to connect visibility signal
@@ -2346,21 +2360,25 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # We use a list to avoid issues with modifying the project during iteration
         for layer in list(QgsProject.instance().mapLayers().values()):
-            if layer.customProperty("nlmod_inspector_managed"):
-                if layer.customProperty("nlmod_inspector_source") == filepath:
+            is_managed = layer.customProperty("nlmod_viewer_managed") or layer.customProperty("nlmod_inspector_managed")
+            if is_managed:
+                source = layer.customProperty("nlmod_viewer_source") or layer.customProperty("nlmod_inspector_source")
+                if source == filepath:
                     layers_to_refresh.append(layer)
         
         if layers_to_refresh:
-            QgsMessageLog.logMessage(f"NLMOD: Restoring {len(layers_to_refresh)} managed layers", "NlmodInspector", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Restoring {len(layers_to_refresh)} managed layers", "NLMOD Viewer", Qgis.Info)
             
         for layer in layers_to_refresh:
-            var_name = layer.customProperty("nlmod_inspector_var")
+            var_name = layer.customProperty("nlmod_viewer_var") or layer.customProperty("nlmod_inspector_var")
             if not var_name: continue
             
             # Read properties
             try:
-                layer_idx = int(layer.customProperty("nlmod_inspector_layer_idx") or 0)
-                time_idx = int(layer.customProperty("nlmod_inspector_time_idx") or 0)
+                l_idx = layer.customProperty("nlmod_viewer_layer_idx") or layer.customProperty("nlmod_inspector_layer_idx")
+                t_idx = layer.customProperty("nlmod_viewer_time_idx") or layer.customProperty("nlmod_inspector_time_idx")
+                layer_idx = int(l_idx or 0)
+                time_idx = int(t_idx or 0)
             except (ValueError, TypeError):
                 layer_idx = 0
                 time_idx = 0

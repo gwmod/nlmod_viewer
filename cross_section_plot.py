@@ -806,7 +806,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             else:
                 # Fallback to slower custom Item if PColorMeshItem fails (e.g. older versions or NaN coords)
                 from qgis.core import QgsMessageLog, Qgis
-                QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NlmodInspector", Qgis.Info)
+                QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NLMOD Viewer", Qgis.Info)
                 self.dataset_item = CrossSectionMeshItem(
                     dists, top, botm, vals, cmap, (v_min, v_max), 
                     show_layer_boundaries=False, # Item handles its own
