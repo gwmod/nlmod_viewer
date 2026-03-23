@@ -878,8 +878,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                     y_pos = (l_top[j_max] + l_bot[j_max] + l_top[j_max+1] + l_bot[j_max+1]) / 4
                     
                     # Add Label
-                    name_idx = i % len(layer_names)
-                    txt = pg.TextItem(layer_names[name_idx], anchor=(0.5, 0.5), color='k')
+                    if len(layer_names) > 0:
+                        name_str = layer_names[i % len(layer_names)]
+                    else:
+                        name_str = str(i+1)
+                    txt = pg.TextItem(name_str, anchor=(0.5, 0.5), color='k')
                     txt.setPos(x_pos, y_pos)
                     self.plot_widget.addItem(txt)
                     self.label_items.append(txt)

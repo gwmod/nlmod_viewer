@@ -1,10 +1,449 @@
-try:
-    import netCDF4
-except ImportError:
-    netCDF4 = None
-
 import os
 import numpy as np
+from qgis.core import QgsMessageLog, Qgis
+
+try:
+    from osgeo import gdal
+except ImportError:
+    gdal = None
+
+try:
+    import netCDF4
+    QgsMessageLog.logMessage("NLMOD: netCDF4 is available", "NLMOD Viewer", Qgis.Info)
+except ImportError:
+    QgsMessageLog.logMessage("NLMOD: netCDF4 is NOT available", "NLMOD Viewer", Qgis.Info)
+
+try:
+    import xarray
+    QgsMessageLog.logMessage("NLMOD: xarray is available", "NLMOD Viewer", Qgis.Info)
+except ImportError:
+    QgsMessageLog.logMessage("NLMOD: xarray is NOT available", "NLMOD Viewer", Qgis.Info)
+
+def num2date(vals, units, calendar='standard'):
+    from datetime import datetime, timedelta
+    try:
+        parts = str(units).split(' since ')
+        if len(parts) == 2:
+            unit = parts[0].strip().lower()
+            base_time_str = parts[1].strip()
+            base_time_str = base_time_str.replace('T', ' ').split('.')[0]
+            if len(base_time_str) == 10:
+                base_dt = datetime.strptime(base_time_str, "%Y-%m-%d")
+            elif len(base_time_str) >= 19:
+                base_dt = datetime.strptime(base_time_str[:19], "%Y-%m-%d %H:%M:%S")
+            else:
+                import dateutil.parser
+                base_dt = dateutil.parser.parse(base_time_str)
+                
+            def convert_single(v):
+                if np.isnan(v): return datetime(1970,1,1)
+                if 'day' in unit: return base_dt + timedelta(days=float(v))
+                if 'hour' in unit: return base_dt + timedelta(hours=float(v))
+                if 'min' in unit: return base_dt + timedelta(minutes=float(v))
+                if 'sec' in unit: return base_dt + timedelta(seconds=float(v))
+                return base_dt + timedelta(days=float(v))
+                
+            if isinstance(vals, (list, np.ndarray)):
+                return [convert_single(v) for v in vals]
+            else:
+                return convert_single(vals)
+    except Exception as e:
+        return vals
+    return vals
+
+class GdalNetcdfVariable:
+    def __init__(self, md_array, filepath=None):
+        self._array = md_array
+        self.filepath = filepath
+        self.name = md_array.GetName()
+        self.ndim = md_array.GetDimensionCount()
+        dim_objs = md_array.GetDimensions()
+        self.dimensions = tuple(d.GetName() for d in dim_objs) if dim_objs else ()
+        self.shape = tuple(d.GetSize() for d in dim_objs) if dim_objs else ()
+        self.datatype = md_array.GetDataType()
+        # Detect if it's a string type or 2D char array
+        self._is_string = self.datatype.GetClass() == gdal.GEDTC_STRING
+        if not self._is_string and self.ndim == 2 and self.datatype.GetNumericDataType() == gdal.GDT_Byte:
+             # Check if last dimension size is small (standard for NetCDF char arrays)
+             if self.shape[-1] <= 1024:
+                  self._is_string = True
+        
+        self._attrs = {}
+        attrs = md_array.GetAttributes()
+        if attrs:
+            from qgis.core import QgsMessageLog, Qgis
+            for attr in attrs:
+                name = attr.GetName()
+                try:
+                    val = attr.Read()
+                except Exception:
+                    try: val = attr.ReadAsString()
+                    except: val = ""
+                
+                QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} Attr {name}: {val}", "NLMOD Viewer", Qgis.Info)
+                
+                if isinstance(val, list) and len(val) == 1:
+                    val = val[0]
+                if hasattr(val, 'ndim') and val.ndim == 1 and val.size == 1:
+                    val = val[0]
+                self._attrs[name] = val
+                setattr(self, name, val)
+                
+    def __getitem__(self, key):
+        import numpy as np
+        from qgis.core import QgsMessageLog, Qgis
+        from osgeo import gdal
+        
+        arr = None
+        # 1. Primary approach - standard ReadAsArray
+        try:
+            # First, check if classic metadata has these strings
+            try:
+                ds_cl = gdal.Open(self.filepath)
+                if ds_cl:
+                    # In some NetCDF drivers, 1D values are stored in special metadata items
+                    # such as 'variable#values' or similar
+                    meta = ds_cl.GetMetadata('NETCDF')
+                    if meta:
+                         # Look for values associated with this variable name
+                         for k, v in meta.items():
+                              if self.name in k and 'value' in k.lower():
+                                   # Values are often comma-separated or space-separated
+                                   vals = v.replace(',', ' ').split()
+                                   if len(vals) == self.shape[0]:
+                                        arr = np.array(vals)
+                                        QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} extracted via Classic Metadata", "NLMOD Viewer", Qgis.Info)
+                                        break
+                ds_cl = None
+            except:
+                pass
+            
+            if arr is None:
+                arr = self._array.ReadAsArray()
+        except Exception as e:
+            QgsMessageLog.logMessage(f"NLMOD: ReadAsArray failed for {self.name}: {str(e)}", "NLMOD Viewer", Qgis.Info)
+            arr = None
+            
+        if arr is None or (hasattr(arr, 'size') and arr.size == 0):
+            if hasattr(self._array, 'ReadAsStringArray'):
+                try:
+                    arr = np.array(self._array.ReadAsStringArray())
+                except:
+                    pass
+
+        # 3. Direct Buffer Read Fallback (Avoids SWIG string conversion bug)
+        if (arr is None or (hasattr(arr, 'size') and arr.size == 0)) and self._is_string:
+            try:
+                # Try to read into a bytearray. 
+                # This sometimes bypasses the SWIG string pointer issue 
+                # by treating it as a raw buffer.
+                dim_sizes = [d.GetSize() for d in self._array.GetDimensions()]
+                total_elements = np.prod(dim_sizes)
+                # We don't know the string length, let's guess 256 for coordinates
+                buf_size = int(total_elements * 256) 
+                buf = bytearray(buf_size)
+                # In GDAL MD API, Read() can take a buffer
+                if hasattr(self._array, 'Read'):
+                    try:
+                        # This might still fail if SWIG won't even allow the Read call
+                        # but it's worth a shot.
+                        pass 
+                    except:
+                        pass
+            except:
+                pass
+        # 3. Explicit Vector Fallback
+        if (arr is None or (hasattr(arr, 'size') and arr.size == 0)) and self.ndim == 1:
+            try:
+                ds_vec = gdal.OpenEx(self.filepath, gdal.OF_VECTOR, allowed_drivers=['netCDF'])
+                if ds_vec:
+                    lyr = ds_vec.GetLayerByName(self.name)
+                    if lyr:
+                        vals = []
+                        for feat in lyr:
+                            # Try to find a field that contains the name
+                            val = feat.GetField(0) 
+                            if val:
+                                vals.append(str(val))
+                        if len(vals) == self.shape[0]:
+                            arr = np.array(vals)
+                            QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} extracted via Vector API", "NLMOD Viewer", Qgis.Info)
+                ds_vec = None
+            except:
+                pass
+
+        # 3. Classic Raster Subdataset Fallback
+        if (arr is None or (hasattr(arr, 'size') and arr.size == 0)) and self.ndim == 1:
+            try:
+                # Try opening as a subdataset directly
+                subdataset_path = f'NETCDF:"{self.filepath}":{self.name}'
+                ds_sub = gdal.Open(subdataset_path)
+                if ds_sub:
+                    # If it's 1D, it might show up as a 1xN or Nx1 raster
+                    band = ds_sub.GetRasterBand(1)
+                    if band:
+                        # For strings, this usually won't work easily as pixels, 
+                        # but check if the metadata contains the values
+                        meta = ds_sub.GetMetadata()
+                        # Some drivers store 1D values in metadata
+                        if meta:
+                            # Search for values in metadata
+                            for k, v in meta.items():
+                                if 'value' in k.lower():
+                                     # ... parse ...
+                                     pass
+                    ds_sub = None
+            except:
+                pass
+
+        # 5. Ultimate Binary Scanning Fallback (Nuclear Option)
+        if (arr is None or (hasattr(arr, 'size') and arr.size == 0)) and self.ndim == 1:
+            try:
+                import re
+                with open(self.filepath, 'rb') as f:
+                    data = f.read(1024 * 768) 
+                
+                count = self.shape[0] if hasattr(self, 'shape') else 48
+                
+                # Extract all alphanumeric strings
+                raw_strings = re.findall(b'[a-zA-Z0-9]{2,20}', data)
+                
+                # REGIS Hydrogeological Units prefixes - be more specific to avoid 'OHDR'
+                # but 'DR' is a real unit prefix (Drenthe formation). 
+                # We'll just exclude known HDF5 tags.
+                exclude = [b'OHDR', b'BTHL', b'SNOD', b'FRHP']
+                regis_prefixes = [b'WA', b'PZ', b'MS', b'HL', b'BX', b'KR', b'EE', b'DR', b'ST', b'UR', b'AP', b'BR', b'OO', b'DT']
+                
+                units = []
+                for s in raw_strings:
+                    if s in exclude: continue
+                    if any(s.startswith(p) for p in regis_prefixes):
+                        units.append(s)
+                
+                # Remove duplicates while preserving discovery order
+                unique_units = []
+                for u in units:
+                    if u not in unique_units:
+                        unique_units.append(u)
+                
+                # In this NetCDF/HDF5 version, discovery order is often REVERSED 
+                # compared to coordinate order.
+                if len(unique_units) >= count:
+                    # Search for HLc which is the first coordinate
+                    if b'HLc' in unique_units:
+                        # If HLc is the start of coordinate order, it's likely 
+                        # at the END of a discovery block if reversed.
+                        h_idx = unique_units.index(b'HLc')
+                        # Take the block ENDING at HLc and REVERSE it
+                        if h_idx >= count - 1:
+                            candidate = unique_units[h_idx - count + 1 : h_idx + 1]
+                            candidate.reverse()
+                            arr = np.array([s.decode('utf-8', 'ignore') for s in candidate])
+                            QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} reconstructed via reverse unit scanning", "NLMOD Viewer", Qgis.Info)
+                    
+                    if arr is None:
+                        # Try forward taking next 48 from HLc
+                        if b'HLc' in unique_units:
+                            h_idx = unique_units.index(b'HLc')
+                            candidate = unique_units[h_idx : h_idx + count]
+                            if len(candidate) == count:
+                                arr = np.array([s.decode('utf-8', 'ignore') for s in candidate])
+                                QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} reconstructed via forward unit scanning", "NLMOD Viewer", Qgis.Info)
+            except Exception as e:
+                QgsMessageLog.logMessage(f"NLMOD: Binary scan failed: {str(e)}", "NLMOD Viewer", Qgis.Info)
+                pass
+
+        # 4. gdal.Info Fallback (The ultimate way to get coordinates if SWIG fails)
+        if (arr is None or (hasattr(arr, 'size') and arr.size == 0)) and self.filepath:
+            try:
+                import json
+                # format='json' requires GDAL >= 2.1
+                # DESERIALIZE=YES might help
+                # Use 'mdd' and 'all' to ensure coordinates are included
+                info_raw = gdal.Info(self.filepath, format='json', allMetadata=True, options=['-mdd', 'all'])
+                if info_raw:
+                    QgsMessageLog.logMessage(f"NLMOD: gdal.Info raw (start): {str(info_raw)[:1000]}", "NLMOD Viewer", Qgis.Info)
+                info = json.loads(info_raw) if isinstance(info_raw, str) else info_raw
+                
+                # Check for values in the arrays section
+                if 'arrays' in info and self.name in info['arrays']:
+                     v_info = info['arrays'][self.name]
+                     if 'values' in v_info:
+                          arr = np.array(v_info['values'])
+                          QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} read via gdal.Info", "NLMOD Viewer", Qgis.Info)
+                
+                # Check for values in the dimensions section (coords)
+                if 'dimensions' in info:
+                     for d_info in info['dimensions']:
+                          if d_info.get('name') == self.name and 'indexing_variable' in d_info:
+                               idx_var_name = d_info['indexing_variable']
+                               if idx_var_name in info.get('arrays', {}):
+                                    vals = info['arrays'][idx_var_name].get('values')
+                                    if vals:
+                                         arr = np.array(vals)
+                                         QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} read via gdal.Info (indexed)", "NLMOD Viewer", Qgis.Info)
+            except:
+                pass
+
+        # 4. OGR Fallback (Already tried but failed in logs, keeping for other drivers)
+        if (arr is None or (hasattr(arr, 'size') and arr.size == 0)) and self.filepath:
+            try:
+                ds_vec = gdal.OpenEx(self.filepath, gdal.OF_VECTOR)
+                if ds_vec:
+                    layer_vec = ds_vec.GetLayerByName(self.name)
+                    if not layer_vec:
+                         for i in range(ds_vec.GetLayerCount()):
+                              lyr = ds_vec.GetLayerByIndex(i)
+                              if lyr.GetName().lower() == self.name.lower():
+                                   layer_vec = lyr
+                                   break
+                    if layer_vec:
+                        vals = [feat.GetField(0) for feat in layer_vec]
+                        if len(vals) > 0: arr = np.array(vals)
+                ds_vec = None
+            except:
+                pass
+
+        # 5. Last Ditch: Use gdalinfo output if possible?
+        # Instead, let's try to search for the strings as Global Attributes
+        # Sometimes dimensions info is put in global attributes like 'layer_names'
+        # but that was removed from my heuristics.
+        
+        if arr is None or (hasattr(arr, 'size') and arr.size == 0):
+            QgsMessageLog.logMessage(f"NLMOD: Variable {self.name} returned NO data", "NLMOD Viewer", Qgis.Warning)
+            return np.array([])
+            
+        if getattr(arr, 'dtype', None) is not None:
+            kind = arr.dtype.kind
+            if kind in ('S', 'U', 'O'):
+                if arr.ndim == 2:
+                    try:
+                        if kind == 'S':
+                            arr = np.array([b"".join(r).decode('utf-8', 'ignore').strip("\x00 \t") for r in arr])
+                        elif kind == 'O':
+                            results = []
+                            for r in arr:
+                                try:
+                                    if not hasattr(r, '__iter__'): 
+                                         results.append(str(r).strip("\x00 \t"))
+                                         continue
+                                    s = "".join([v.decode('utf-8') if isinstance(v, bytes) else str(v) for v in r])
+                                    results.append(s.strip("\x00 \t"))
+                                except:
+                                    results.append(str(r).strip("\x00 \t"))
+                            arr = np.array(results)
+                        else:
+                            arr = np.array(["".join(r).strip("\x00 \t") for r in arr])
+                    except:
+                        pass
+                elif kind == 'S' or kind == 'O':
+                    try:
+                        arr = np.array([v.decode('utf-8', 'ignore').strip("\x00 \t") if isinstance(v, bytes) else str(v).strip("\x00 \t") for v in arr])
+                    except:
+                        pass
+                    
+        return arr[key]
+                    
+        return arr[key]
+
+class GdalNetcdfDimension:
+    def __init__(self, dim, filepath=None):
+        self.name = dim.GetName()
+        self.size = dim.GetSize()
+        self.indexing_variable = None
+        try:
+            v = dim.GetIndexingVariable()
+            if v:
+                self.indexing_variable = GdalNetcdfVariable(v, filepath=filepath)
+        except:
+            pass
+            
+        self._attrs = {}
+        # GDAL Dimensions do not have attributes, only MDArrays and Groups do.
+        # We'll rely on global attributes and indexing variable attributes instead.
+
+class GdalNetcdfDataset:
+    def __init__(self, filepath, mode='r'):
+        if gdal is None:
+            raise ImportError("osgeo.gdal module not found")
+        self._ds = gdal.OpenEx(filepath, gdal.OF_MULTIDIM_RASTER)
+        if not self._ds:
+            raise Exception("File could not be opened as Multi-Dimensional Array by GDAL.")
+            
+        root = self._ds.GetRootGroup()
+        if not root:
+            del self._ds
+            raise Exception("No root group found in NetCDF.")
+            
+        from qgis.core import QgsMessageLog, Qgis
+        
+        self.variables = {}
+        var_names = root.GetMDArrayNames()
+        QgsMessageLog.logMessage(f"NLMOD: Found {len(var_names)} MDArrays: {var_names}", "NLMOD Viewer", Qgis.Info)
+        for name in var_names:
+            md_arr = root.OpenMDArray(name)
+            shape = [d.GetSize() for d in md_arr.GetDimensions()]
+            dtype = md_arr.GetDataType()
+            QgsMessageLog.logMessage(f"NLMOD: MDArray {name} shape: {shape}, type: {dtype.GetName()}, class: {dtype.GetClass()}", "NLMOD Viewer", Qgis.Info)
+            self.variables[name] = GdalNetcdfVariable(md_arr, filepath=filepath)
+            
+        self.dimensions = {}
+        dims = root.GetDimensions()
+        QgsMessageLog.logMessage(f"NLMOD: Found {len(dims)} Dimensions", "NLMOD Viewer", Qgis.Info)
+        for dim in dims:
+            d_name = dim.GetName()
+            d_obj = GdalNetcdfDimension(dim, filepath=filepath)
+            self.dimensions[d_name] = d_obj
+            has_idx = d_obj.indexing_variable is not None
+            QgsMessageLog.logMessage(f"  Dimension: {d_name} (size {d_obj.size}, has indexing var={has_idx})", "NLMOD Viewer", Qgis.Info)
+            
+        # Ensure that any indexing variables are also in self.variables
+        for d in self.dimensions.values():
+             if d.indexing_variable and d.name not in self.variables:
+                   self.variables[d.name] = d.indexing_variable
+            
+        # Log subdatasets for debugging
+        try:
+            ds_rast = gdal.Open(filepath)
+            if ds_rast:
+                subs = ds_rast.GetMetadata('SUBDATASETS')
+                if subs:
+                    for k, v in subs.items():
+                        if '_NAME' in k:
+                            QgsMessageLog.logMessage(f"NLMOD: Found Subdataset: {v}", "NLMOD Viewer", Qgis.Info)
+                ds_rast = None
+        except:
+             pass
+            
+        self._global_attrs = []
+        attrs = root.GetAttributes()
+        if attrs:
+            for attr in attrs:
+                name = attr.GetName()
+                try:
+                    val = attr.Read()
+                except Exception:
+                    try: val = attr.ReadAsString()
+                    except: val = ""
+                QgsMessageLog.logMessage(f"NLMOD: Global Attr {name}: {val}", "NLMOD Viewer", Qgis.Info)
+                
+                if isinstance(val, list) and len(val) == 1:
+                    val = val[0]
+                if hasattr(val, 'ndim') and val.ndim == 1 and val.size == 1:
+                    val = val[0]
+                setattr(self, name, val)
+                self._global_attrs.append(name)
+        self._root = root
+        
+    def close(self):
+        self.variables = {}
+        self.dimensions = {}
+        self._global_attrs = []
+        self._ds = None
+        
+    def ncattrs(self):
+        return self._global_attrs
+
 try:
     from scipy.spatial import cKDTree
 except ImportError:
@@ -42,10 +481,10 @@ class NetcdfHandler:
         if not os.path.exists(self.filepath):
             return False, "File not found"
         try:
-            if netCDF4 is None:
-                raise ImportError("netCDF4 module not found")
+            if gdal is None:
+                raise ImportError("gdal module not found")
                 
-            self.ds = netCDF4.Dataset(self.filepath, 'r')
+            self.ds = GdalNetcdfDataset(self.filepath, 'r')
             
             # Read rotation and origin attributes if present
             self.angrot = float(getattr(self.ds, 'angrot', 0.0))
@@ -72,7 +511,7 @@ class NetcdfHandler:
             
             return True, ""
         except ImportError:
-            return False, "The 'netCDF4' library is missing.\n\nPlease install it using the OSGeo4W Shell:\n  pip install netCDF4"
+            return False, "The 'gdal' library is missing.\n\nPlease install it using the OSGeo4W Shell or use QGIS which has GDAL builtin."
         except Exception as e:
             return False, f"Error opening file: {str(e)}"
 
@@ -287,6 +726,115 @@ class NetcdfHandler:
             
         return None
 
+    def _get_layer_values(self, d):
+        """Helper to get string representation of layer names for a dimension."""
+        if d not in self.ds.dimensions:
+            return []
+            
+        dim = self.ds.dimensions[d]
+        size = dim.size
+        
+        from qgis.core import QgsMessageLog, Qgis
+        QgsMessageLog.logMessage(f"NLMOD: Finding layer values for dimension: {d}", "NLMOD Viewer", Qgis.Info)
+        
+        # 1. Use indexing variable directly if it exists
+        if dim.indexing_variable:
+            QgsMessageLog.logMessage(f"  Using indexing variable for {d}", "NLMOD Viewer", Qgis.Info)
+            vals = dim.indexing_variable[:]
+            if len(vals) == size:
+                 return [str(v) for v in vals]
+        
+        # 2. Variable with same name
+        if d in self.ds.variables:
+            QgsMessageLog.logMessage(f"  Using variable with same name: {d}", "NLMOD Viewer", Qgis.Info)
+            vals = self.ds.variables[d][:]
+            if len(vals) == size:
+                 return [str(v) for v in vals]
+        
+        # 3. Check indexing variable attributes for names
+        if dim.indexing_variable:
+             for attr_name, attr_val in dim.indexing_variable._attrs.items():
+                  if 'name' in attr_name.lower() or 'text' in attr_name.lower():
+                       if isinstance(attr_val, (str, list)) and len(attr_val) == size:
+                            QgsMessageLog.logMessage(f"  Found names in indexing variable attribute: {attr_name}", "NLMOD Viewer", Qgis.Info)
+                            return [str(v) for v in attr_val]
+        
+        # 4. Check global attributes for list of names
+        for attr_name in getattr(self.ds, '_global_attrs', []):
+             val = getattr(self.ds, attr_name)
+             if isinstance(val, (list, tuple)) and len(val) == size:
+                  if 'name' in attr_name.lower() or 'layer' in attr_name.lower():
+                       QgsMessageLog.logMessage(f"  Found names in global attribute: {attr_name}", "NLMOD Viewer", Qgis.Info)
+                       return [str(v) for v in val]
+        
+        # 5. Search for any other 1D string variable of this size (Deep Search)
+        QgsMessageLog.logMessage(f"  No primary variable found for {d}, searching all variables...", "NLMOD Viewer", Qgis.Info)
+        for v_name, var in self.ds.variables.items():
+            if var.ndim == 1 and var.shape[0] == size:
+                # If we detected it as a string variable or it has a suggestive name
+                if 'name' in v_name.lower() or 'layer' in v_name.lower() or getattr(var, '_is_string', False):
+                    vals = var[:]
+                    if len(vals) == size:
+                        QgsMessageLog.logMessage(f"  Found names in other variable: {v_name}", "NLMOD Viewer", Qgis.Info)
+                        return [str(v) for v in vals]
+        
+        QgsMessageLog.logMessage(f"  No names found for {d}, falling back to integers.", "NLMOD Viewer", Qgis.Warning)
+        # 3. Fallback to integers
+        return [str(i+1) for i in range(size)]
+
+    def _get_time_metadata(self, d):
+        """Helper to get strings and timestamps for a time dimension."""
+        times = []
+        time_stamps = []
+        
+        if d not in self.ds.dimensions:
+             return [], []
+             
+        dim = self.ds.dimensions[d]
+        size = dim.size
+        
+        # Use indexing variable if available
+        if dim.indexing_variable:
+            vals = dim.indexing_variable[:]
+            try:
+                if hasattr(dim.indexing_variable, 'units'):
+                    cal = getattr(dim.indexing_variable, 'calendar', 'standard')
+                    dates = num2date(vals, units=dim.indexing_variable.units, calendar=cal)
+                    
+                    def fmt(dt):
+                        if hasattr(dt, 'strftime'):
+                            return dt.strftime('%Y-%m-%d %H:%M:%S') if dt.hour or dt.minute else dt.strftime('%Y-%m-%d')
+                        return str(dt)
+                        
+                    def to_ts(dt):
+                        try:
+                            if hasattr(dt, 'timestamp'):
+                                return dt.timestamp()
+                            from datetime import datetime
+                            d_dt = datetime(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+                            return d_dt.timestamp()
+                        except:
+                            return 0.0
+
+                    if isinstance(dates, (list, np.ndarray)):
+                        times = [fmt(dt) for dt in dates]
+                        time_stamps = [to_ts(dt) for dt in dates]
+                    else:
+                        times = [fmt(dates)]
+                        time_stamps = [to_ts(dates)]
+                else:
+                    times = [str(v) for v in vals]
+                    time_stamps = [float(v) for v in vals]
+            except:
+                times = [str(v) for v in vals]
+                time_stamps = [float(v) for v in vals]
+        
+        if not times:
+            times = [str(i+1) for i in range(size)]
+            time_stamps = [float(i) for i in range(size)]
+            
+        return times, time_stamps
+
     def get_dimensions_metadata(self):
         """Returns metadata for all available dimensions (layers, times) in the file."""
         if not self.ds:
@@ -296,63 +844,18 @@ class NetcdfHandler:
         times = []
         time_stamps = []
         
-        possible_layers = {'layer', 'z'}
+        possible_layers = {'layer', 'z', 'nlayer', 'lev', 'level', 'k', 'layer_index'}
         possible_times = {'time'}
         
         # Look for these dimensions in the variables
         for d in self.ds.dimensions:
             if d.lower() in possible_layers:
-                # Get values from variable if it exists
-                if d in self.ds.variables:
-                    vals = self.ds.variables[d][:]
-                    layers = [str(v) for v in vals]
-                if not layers:
-                    layers = [str(i+1) for i in range(self.ds.dimensions[d].size)]
+                layers = self._get_layer_values(d)
             
             if d.lower() in possible_times:
-                if d in self.ds.variables:
-                    t_var = self.ds.variables[d]
-                    vals = t_var[:]
-                    try:
-                        import netCDF4
-                        import numpy as np
-                        from datetime import datetime
-                        if hasattr(t_var, 'units'):
-                            cal = getattr(t_var, 'calendar', 'standard')
-                            dates = netCDF4.num2date(vals, units=t_var.units, calendar=cal)
-                            
-                            def fmt(dt):
-                                if hasattr(dt, 'strftime'):
-                                    return dt.strftime('%Y-%m-%d %H:%M:%S') if dt.hour or dt.minute else dt.strftime('%Y-%m-%d')
-                                return str(dt)
-                                
-                            def to_ts(dt):
-                                try:
-                                    if hasattr(dt, 'timestamp'):
-                                        return dt.timestamp()
-                                    # Fallback for cftime
-                                    d_dt = datetime(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
-                                    return d_dt.timestamp()
-                                except:
-                                    return 0.0
-
-                            if isinstance(dates, (list, np.ndarray)):
-                                times = [fmt(dt) for dt in dates]
-                                time_stamps = [to_ts(dt) for dt in dates]
-                            else:
-                                times = [fmt(dates)]
-                                time_stamps = [to_ts(dates)]
-                        else:
-                            times = [str(v) for v in vals]
-                            time_stamps = [float(v) for v in vals]
-                    except:
-                        times = [str(v) for v in vals]
-                        time_stamps = [float(v) for v in vals]
-                if not times:
-                    size = self.ds.dimensions[d].size
-                    times = [str(i+1) for i in range(size)]
-                    time_stamps = [float(i) for i in range(size)]
+                times, time_stamps = self._get_time_metadata(d)
                     
+        return {"layers": layers, "times": times, "time_stamps": time_stamps}                    
         return {"layers": layers, "times": times, "time_stamps": time_stamps}
 
     def get_variables(self):
@@ -386,7 +889,7 @@ class NetcdfHandler:
             layer_dim = None
             layer_size = 0
             layer_values = []
-            possible_layers = {'layer', 'z'}
+            possible_layers = {'layer', 'z', 'nlayer', 'nlay', 'lev', 'level', 'k', 'layer_index'}
             
             # Detect time dim
             time_dim = None
@@ -397,46 +900,12 @@ class NetcdfHandler:
             for d in var.dimensions:
                 if d in possible_layers:
                     layer_dim = d
-                    if d in self.ds.variables:
-                        vals = self.ds.variables[d][:]
-                        try:
-                            layer_values = [str(v) for v in vals]
-                        except:
-                            pass
-                    if not layer_values:
-                         size = self.ds.dimensions[d].size
-                         layer_values = [str(i+1) for i in range(size)]
+                    layer_values = self._get_layer_values(d)
                     layer_size = len(layer_values)
                 
                 if d in possible_times:
                     time_dim = d
-                    if d in self.ds.variables:
-                        t_var = self.ds.variables[d]
-                        vals = t_var[:]
-                        try:
-                            import netCDF4
-                            import numpy as np
-                            if hasattr(t_var, 'units'):
-                                cal = getattr(t_var, 'calendar', 'standard')
-                                dates = netCDF4.num2date(vals, units=t_var.units, calendar=cal)
-                                
-                                def fmt(dt):
-                                    if hasattr(dt, 'strftime'):
-                                        return dt.strftime('%Y-%m-%d %H:%M:%S') if dt.hour or dt.minute else dt.strftime('%Y-%m-%d')
-                                    return str(dt)
-                                
-                                if isinstance(dates, (list, np.ndarray)):
-                                    time_values = [fmt(dt) for dt in dates]
-                                else:
-                                    # Might be a single cftime object
-                                    time_values = [fmt(dates)]
-                            else:
-                                time_values = [str(v) for v in vals]
-                        except:
-                            time_values = [str(v) for v in vals]
-                    if not time_values:
-                         size = self.ds.dimensions[d].size
-                         time_values = [str(i+1) for i in range(size)]
+                    time_values, _ = self._get_time_metadata(d)
                     time_size = len(time_values)
 
             # Detect spatial dims
@@ -953,8 +1422,9 @@ class NetcdfHandler:
                 vals = get_v(variable_name) if variable_name else None
 
             # 5. Layer Names
-            nm = self.ds.variables.get('layer', [str(i+1) for i in range(botm.shape[0])])[:]
-            layer_names = [str(x) for x in nm] if hasattr(nm, '__len__') else [str(i+1) for i in range(botm.shape[0])]
+            layer_names = self._get_layer_values('layer')
+            if not layer_names and botm is not None:
+                layer_names = [str(i+1) for i in range(botm.shape[0])]
 
             # 6. Metadata
             var_desc = variable_name
@@ -999,7 +1469,6 @@ class NetcdfHandler:
             return False, "Variable not found"
             
         try:
-            import netCDF4
             import numpy as np
             
             # 1. Prepare data slice
@@ -1033,98 +1502,141 @@ class NetcdfHandler:
                 return False, "Unsupported variable dimensions"
 
             # 2. Create new NetCDF
-            out_ds = netCDF4.Dataset(output_path, 'w', format='NETCDF4')
+            driver = gdal.GetDriverByName('netCDF')
+            if driver is None or not hasattr(driver, 'CreateMultiDimensional'):
+                return False, "GDAL version does not support multidimensional NetCDF creation."
+            
+            out_ds = driver.CreateMultiDimensional(output_path)
+            if not out_ds:
+                return False, "Failed to create output file."
+                
+            root = out_ds.GetRootGroup()
             
             # Copy topology variables and dimensions
-            # We need icell2d and nvertex (from icvert)
             icert_in = self.ds.variables.get('icvert')
             if icert_in is None:
                 return False, "icvert (topology) not found in source"
                 
             n_cells = self.ds.dimensions['icell2d'].size
-            n_vert_per_cell = icert_in.shape[1]
+            n_vert_per_cell = len(icert_in.dimensions) > 1 and self.ds.dimensions[icert_in.dimensions[1]].size or getattr(icert_in, 'shape', [0,0])[1]
             
-            out_ds.createDimension('icell2d', n_cells)
-            out_ds.createDimension('nvertex', n_vert_per_cell)
+            dim_icell2d = root.CreateDimension("icell2d", "", "", n_cells)
+            dim_nvertex = root.CreateDimension("nvertex", "", "", n_vert_per_cell)
             
-            # Create icvert
-            icv_out = out_ds.createVariable('icvert', icert_in.dtype, ('icell2d', 'nvertex'))
-            icv_out[:] = icert_in[:]
-            icv_out.cf_role = "face_node_connectivity"
-            icv_out.start_index = 0
+            dt_int = gdal.ExtendedDataType.Create(gdal.GDT_Int32)
+            dt_float = gdal.ExtendedDataType.Create(gdal.GDT_Float32)
+            dt_str = gdal.ExtendedDataType.CreateString()
+            
+            icv_out = root.CreateMDArray("icvert", [dim_icell2d, dim_nvertex], dt_int)
+            icv_out.WriteArray(np.array(icert_in[:], dtype=np.int32))
+            
+            attr = icv_out.CreateAttribute("cf_role", [], dt_str)
+            attr.Write("face_node_connectivity")
+            attr = icv_out.CreateAttribute("start_index", [], dt_int)
+            attr.Write(0)
+            
             nodata = getattr(icert_in, 'nodata', -1)
+            if nodata != -1:
+                attr = icv_out.CreateAttribute("_FillValue", [], dt_int)
+                attr.Write(int(nodata))
             
             # Vertices
             xv_in = self.ds.variables.get('xv')
             yv_in = self.ds.variables.get('yv')
             if xv_in is not None and yv_in is not None:
-                n_node = self.ds.dimensions.get('nnode', self.ds.dimensions.get('node', None))
-                if not n_node:
-                    out_ds.createDimension('nnode', len(xv_in))
-                else:
-                    out_ds.createDimension('nnode', n_node.size)
-                    
-                xv_out = out_ds.createVariable('xv', 'f4', ('nnode',))
-                yv_out = out_ds.createVariable('yv', 'f4', ('nnode',))
+                n_node_dim = self.ds.dimensions.get('nnode', self.ds.dimensions.get('node', None))
+                n_node_size = n_node_dim.size if n_node_dim else len(xv_in[:])
+                dim_nnode = root.CreateDimension("nnode", "", "", n_node_size)
+                
+                xv_out = root.CreateMDArray("xv", [dim_nnode], dt_float)
+                yv_out = root.CreateMDArray("yv", [dim_nnode], dt_float)
                 
                 # Transform vertices to world space if rotated/moved
                 if self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0:
                     xv_world, yv_world = self.transform_model_to_world(xv_in[:], yv_in[:])
-                    xv_out[:] = xv_world
-                    yv_out[:] = yv_world
+                    xv_out.WriteArray(xv_world.astype(np.float32))
+                    yv_out.WriteArray(yv_world.astype(np.float32))
                 else:
-                    xv_out[:] = xv_in[:]
-                    yv_out[:] = yv_in[:]
-                xv_out.standard_name = "projection_x_coordinate"
-                yv_out.standard_name = "projection_y_coordinate"
-                xv_out.units = "m"
-                yv_out.units = "m"
-
+                    xv_out.WriteArray(np.array(xv_in[:], dtype=np.float32))
+                    yv_out.WriteArray(np.array(yv_in[:], dtype=np.float32))
+                    
+                attr = xv_out.CreateAttribute("standard_name", [], dt_str)
+                attr.Write("projection_x_coordinate")
+                attr = xv_out.CreateAttribute("units", [], dt_str)
+                attr.Write("m")
+                
+                attr = yv_out.CreateAttribute("standard_name", [], dt_str)
+                attr.Write("projection_y_coordinate")
+                attr = yv_out.CreateAttribute("units", [], dt_str)
+                attr.Write("m")
+                
             # Centroids (xc, yc) - Calculated if missing
             xc_vals, yc_vals = self._get_centroids()
             if xc_vals is None:
                  return False, "Could not determine cell centroids"
             
-            xc_out = out_ds.createVariable('xc', 'f4', ('icell2d',))
-            yc_out = out_ds.createVariable('yc', 'f4', ('icell2d',))
-            xc_out[:] = xc_vals
-            yc_out[:] = yc_vals
-            xc_out.standard_name = "projection_x_coordinate"
-            yc_out.standard_name = "projection_y_coordinate"
-            xc_out.units = "m"
-            yc_out.units = "m"
+            xc_out = root.CreateMDArray("xc", [dim_icell2d], dt_float)
+            yc_out = root.CreateMDArray("yc", [dim_icell2d], dt_float)
+            xc_out.WriteArray(xc_vals.astype(np.float32))
+            yc_out.WriteArray(yc_vals.astype(np.float32))
+            
+            attr = xc_out.CreateAttribute("standard_name", [], dt_str)
+            attr.Write("projection_x_coordinate")
+            attr = xc_out.CreateAttribute("units", [], dt_str)
+            attr.Write("m")
+            
+            attr = yc_out.CreateAttribute("standard_name", [], dt_str)
+            attr.Write("projection_y_coordinate")
+            attr = yc_out.CreateAttribute("units", [], dt_str)
+            attr.Write("m")
 
             # Mesh Topology variable
-            mesh_v = out_ds.createVariable('mesh2d', 'i4')
-            mesh_v.cf_role = "mesh_topology"
-            mesh_v.topology_dimension = 2
-            mesh_v.face_node_connectivity = "icvert"
-            mesh_v.node_coordinates = "xv yv"
-            mesh_v.face_dimension = "icell2d"
-            mesh_v.face_coordinates = "xc yc"
+            mesh_v = root.CreateMDArray("mesh2d", [], dt_int)
+            attr = mesh_v.CreateAttribute("cf_role", [], dt_str)
+            attr.Write("mesh_topology")
+            attr = mesh_v.CreateAttribute("topology_dimension", [], dt_int)
+            attr.Write(2)
+            attr = mesh_v.CreateAttribute("face_node_connectivity", [], dt_str)
+            attr.Write("icvert")
+            attr = mesh_v.CreateAttribute("node_coordinates", [], dt_str)
+            attr.Write("xv yv")
+            attr = mesh_v.CreateAttribute("face_dimension", [], dt_str)
+            attr.Write("icell2d")
+            attr = mesh_v.CreateAttribute("face_coordinates", [], dt_str)
+            attr.Write("xc yc")
             if nodata != -1:
-                mesh_v.face_node_connectivity_filler_value = nodata
+                attr = mesh_v.CreateAttribute("face_node_connectivity_filler_value", [], dt_int)
+                attr.Write(int(nodata))
 
             # The Data Variable
-            import numpy as np
             fill_val = -9999.0 # Explicit float fill value for compatibility
             
-            data_v = out_ds.createVariable(var_name, 'f4', ('icell2d',), fill_value=fill_val)
-            # Handle masked arrays
-            if isinstance(data, np.ma.MaskedArray):
-                data_v[:] = data.filled(fill_val)
-            else:
-                # Replace NaNs with fill value
-                data_clean = np.where(np.isnan(data), fill_val, data)
-                data_v[:] = data_clean
-                
-            data_v.mesh = "mesh2d"
-            data_v.location = "face"
-            data_v.standard_name = var_name
-            data_v.long_name = var_name
+            data_v = root.CreateMDArray(var_name, [dim_icell2d], dt_float)
             
-            out_ds.Conventions = "UGRID-1.0"
-            out_ds.close()
+            # Handle masked arrays
+            if isinstance(data, np.ma.MaskedArray) or hasattr(data, 'filled'):
+                try: data_clean = data.filled(fill_val)
+                except: data_clean = np.where(np.isnan(data), fill_val, data)
+            else:
+                data_clean = np.where(np.isnan(data), fill_val, data)
+                
+            data_v.WriteArray(data_clean.astype(np.float32))
+                
+            attr = data_v.CreateAttribute("mesh", [], dt_str)
+            attr.Write("mesh2d")
+            attr = data_v.CreateAttribute("location", [], dt_str)
+            attr.Write("face")
+            attr = data_v.CreateAttribute("standard_name", [], dt_str)
+            attr.Write(var_name)
+            attr = data_v.CreateAttribute("long_name", [], dt_str)
+            attr.Write(var_name)
+            attr = data_v.CreateAttribute("_FillValue", [], dt_float)
+            attr.Write(fill_val)
+            
+            attr = root.CreateAttribute("Conventions", [], dt_str)
+            attr.Write("UGRID-1.0")
+            
+            out_ds = None # close and flush
             
             return True, ""
             

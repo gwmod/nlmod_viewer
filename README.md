@@ -40,10 +40,7 @@ This means when you save your QGIS project and reopen it later, your entire anal
 ### Dependencies
 
 - **QGIS 3.x**
-- **Python `netCDF4` library**: Usually included in QGIS (OSGeo4W). If missing, install via OSGeo4W Shell:
-  ```bash
-  pip install netCDF4
-  ```
+- **GDAL/OGR library**: Included in QGIS by default. The plugin uses the GDAL MultiDimensional Data Model API to handle NetCDF data.
 - **Optional**: `pyqtgraph` for cross-section plotting:
   ```bash
   pip install pyqtgraph
@@ -121,4 +118,4 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 - Built for use with [nlmod](https://github.com/gwmod/nlmod) - Netherlands MODFLOW toolkit
 - Uses QGIS API for geospatial visualization
-- NetCDF support via netCDF4-python
+- NetCDF support via GDAL MultiDimensional API
