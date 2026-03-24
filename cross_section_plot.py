@@ -109,17 +109,74 @@ class SettingsDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
+
+class LayerSelectionDialog(QtWidgets.QDialog):
+    def __init__(self, layer_names, selected_indices, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Cross-Section Layers")
+        self.resize(320, 420)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        layout.addWidget(QtWidgets.QLabel("Select layers to plot for this cross-section:"))
+
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        layout.addWidget(self.list_widget)
+
+        selected_set = set(selected_indices)
+        for i, name in enumerate(layer_names):
+            item = QtWidgets.QListWidgetItem(str(name))
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Checked if i in selected_set else QtCore.Qt.Unchecked)
+            self.list_widget.addItem(item)
+
+        quick_layout = QtWidgets.QHBoxLayout()
+        select_all_btn = QtWidgets.QPushButton("Select All")
+        select_none_btn = QtWidgets.QPushButton("Select None")
+        quick_layout.addWidget(select_all_btn)
+        quick_layout.addWidget(select_none_btn)
+        layout.addLayout(quick_layout)
+
+        select_all_btn.clicked.connect(self.select_all)
+        select_none_btn.clicked.connect(self.select_none)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal,
+            self,
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def select_all(self):
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setCheckState(QtCore.Qt.Checked)
+
+    def select_none(self):
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setCheckState(QtCore.Qt.Unchecked)
+
+    def get_selected_indices(self):
+        out = []
+        for i in range(self.list_widget.count()):
+            if self.list_widget.item(i).checkState() == QtCore.Qt.Checked:
+                out.append(i)
+        return out
+
 class CrossSectionPlotWindow(QtWidgets.QDockWidget):
     variable_changed = QtCore.pyqtSignal(str, str) # item_id, new_var_name
     cursor_moved = QtCore.pyqtSignal(str, float) # item_id, distance along cross-section
     cursor_left = QtCore.pyqtSignal()
     range_changed = QtCore.pyqtSignal()
     settings_changed = QtCore.pyqtSignal()
+    layers_changed = QtCore.pyqtSignal(str, object) # item_id, selected layer indices
     sigPointPicked = QtCore.pyqtSignal(object) # Emit QgsPointXY
     def __init__(self, data, variable_name, parent=None, vertex_distances=None, 
                  item_id=None, all_vars=None, head_vars=None, data_fetcher=None, label="A", points=None,
                  z_range=None, x_range=None, v_range=None, show_layers=True, show_cells=False, show_layer_names=False,
-                 use_log=False, cmap_name='Turbo', invert_cmap=False, time_values=None, time_idx=0):
+                 use_log=False, cmap_name='Turbo', invert_cmap=False, time_values=None, time_idx=0,
+                 selected_layers=None):
         super().__init__(parent)
         self.item_id = item_id # Store for signaling
         self.data_fetcher = data_fetcher
@@ -141,6 +198,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.v_max = v_range[1] if v_range else None
         self.time_values = time_values or []
         self.current_time_idx = time_idx
+        self.selected_layer_indices = self._sanitize_selected_layers(selected_layers, data)
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
         self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
@@ -187,6 +245,10 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.reset_btn = QtWidgets.QPushButton("Reset to Data")
         self.reset_btn.clicked.connect(self.reset_ranges)
         tools_layout.addWidget(self.reset_btn)
+
+        self.layers_btn = QtWidgets.QPushButton("Layers...")
+        self.layers_btn.clicked.connect(self.show_layer_selector)
+        tools_layout.addWidget(self.layers_btn)
         
         # Settings Button
         self.settings_btn = QtWidgets.QPushButton("Settings...")
@@ -307,11 +369,55 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             d = self.data['distances']
             self.plot_widget.setXRange(d.min(), d.max(), padding=0)
         # Reset data range
-        valid_vals = self.data['values'][~np.isnan(self.data['values'])]
+        vals = self.data['values']
+        layer_mask = np.array([i in set(self.selected_layer_indices) for i in range(vals.shape[0])], dtype=bool)
+        vals_sel = vals[layer_mask, :] if vals.ndim >= 2 else vals
+        valid_vals = vals_sel[~np.isnan(vals_sel)]
         if len(valid_vals) > 0:
             self.v_min = np.nanmin(valid_vals)
             self.v_max = np.nanmax(valid_vals)
             self.render_data(self.data, self.v_min, self.v_max)
+            self.range_changed.emit()
+
+    def _sanitize_selected_layers(self, selected_layers, data):
+        n_layers = int(data.get('num_layers', 0))
+        if n_layers <= 0:
+            return []
+        if selected_layers is None:
+            return list(range(n_layers))
+        out = []
+        for idx in selected_layers:
+            try:
+                i = int(idx)
+            except Exception:
+                continue
+            if 0 <= i < n_layers and i not in out:
+                out.append(i)
+        if not out:
+            return list(range(n_layers))
+        return sorted(out)
+
+    def is_layer_visible(self, layer_idx):
+        return int(layer_idx) in set(self.selected_layer_indices)
+
+    def show_layer_selector(self):
+        layer_names = self.data.get('layer_names', [])
+        if not layer_names:
+            layer_names = [str(i + 1) for i in range(self.data.get('num_layers', 0))]
+
+        dlg = LayerSelectionDialog(layer_names, self.selected_layer_indices, self)
+        if dlg.exec_():
+            selected = dlg.get_selected_indices()
+            if not selected:
+                QtWidgets.QMessageBox.warning(self, "Invalid Selection", "Select at least one layer.")
+                return
+
+            self.selected_layer_indices = self._sanitize_selected_layers(selected, self.data)
+            self.info_label.setText("Click in plot to see cell info")
+            self.render_data(self.data, self.v_min, self.v_max, vertex_distances=self.vertex_distances)
+            if self.item_id:
+                self.layers_changed.emit(self.item_id, list(self.selected_layer_indices))
+            self.settings_changed.emit()
             self.range_changed.emit()
 
     def apply_data_range(self):
@@ -378,6 +484,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
 
                 self.data = new_data
                 self.current_var = var_name
+                self.selected_layer_indices = self._sanitize_selected_layers(self.selected_layer_indices, self.data)
                 
                 # Reset Data Range (v_min/v_max) so it's recalculated for the new variable
                 # This addresses the user's request for "date range" (intended "data range") updates.
@@ -429,6 +536,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             new_data = self.data_fetcher(self.current_var, self.points, time_idx=time_idx)
             if new_data and "error" not in new_data:
                 self.data = new_data
+                self.selected_layer_indices = self._sanitize_selected_layers(self.selected_layer_indices, self.data)
             
             # Refresh head data if active
             if self.current_head_var != "None":
@@ -568,9 +676,12 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         top = self.rendered_top[seg_start_idx]
         botm = self.rendered_botm[:, seg_start_idx]
         num_layers = self.data['num_layers']
+        selected_set = set(self.selected_layer_indices)
         
         found_layer = -1
         for i in range(num_layers):
+            if i not in selected_set:
+                continue
             l_top = top if i == 0 else botm[i-1]
             l_bot = botm[i]
             
@@ -661,6 +772,13 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         top = data['top'].copy()
         botm = data['botm'].copy()
         vals = data['values']
+        self.selected_layer_indices = self._sanitize_selected_layers(self.selected_layer_indices, data)
+        selected_set = set(self.selected_layer_indices)
+        vals_plot = vals.copy()
+        if vals_plot.ndim >= 2:
+            for i in range(vals_plot.shape[0]):
+                if i not in selected_set:
+                    vals_plot[i, :] = np.nan
         
         # 0. Sync Head Data if necessary
         if self.current_head_var != "None":
@@ -689,7 +807,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         
         # Data Range
         # Exclude both NaNs and Infs for range calculation
-        valid_vals = vals[np.isfinite(vals)]
+        valid_vals = vals_plot[np.isfinite(vals_plot)]
         if len(valid_vals) == 0:
             return
             
@@ -763,7 +881,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             
             # Data: (Layers, Points-1)
             # We use the value from the start of each interval
-            z_mesh = vals[:, :-1]
+            z_mesh = vals_plot[:, :-1]
             
             # Handle Log Scale
             render_min, render_max = v_min, v_max
@@ -808,7 +926,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 from qgis.core import QgsMessageLog, Qgis
                 QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NLMOD Viewer", Qgis.Info)
                 self.dataset_item = CrossSectionMeshItem(
-                    dists, top, botm, vals, cmap, (v_min, v_max), 
+                    dists, top, botm, vals_plot, cmap, (v_min, v_max), 
                     show_layer_boundaries=False, # Item handles its own
                     show_cell_boundaries=False,
                     indices=data.get('indices'),
@@ -820,6 +938,15 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             if self.show_layer_boundaries:
                 pen = pg.mkPen('k', width=1)
                 for i in range(num_layers + 1):
+                    show_boundary = False
+                    if i == 0 and 0 in selected_set:
+                        show_boundary = True
+                    elif i == num_layers and (num_layers - 1) in selected_set:
+                        show_boundary = True
+                    elif (i - 1) in selected_set or i in selected_set:
+                        show_boundary = True
+                    if not show_boundary:
+                        continue
                     # Filter NaNs for PlotCurveItem
                     valid = ~np.isnan(y_mesh[i, :])
                     if np.any(valid):
@@ -850,6 +977,8 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             if self.show_layer_names and 'layer_names' in data:
                 layer_names = data['layer_names']
                 for i in range(num_layers):
+                    if i not in selected_set:
+                        continue
                     # Calculate segment thicknesses for this layer
                     # Layer i top: y_mesh[i], bot: y_mesh[i+1]
                     # We compute average thickness for each interval [j, j+1]
@@ -886,7 +1015,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         else:
             # Fallback to slower custom Item
             self.dataset_item = CrossSectionMeshItem(
-                dists, top, botm, vals, cmap, (v_min, v_max), 
+                dists, top, botm, vals_plot, cmap, (v_min, v_max), 
                 show_layer_boundaries=self.show_layer_boundaries,
                 show_cell_boundaries=self.show_cell_boundaries,
                 indices=data.get('indices'),

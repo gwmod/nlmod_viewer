@@ -33,10 +33,112 @@ class NetcdfHandler:
         self.ds = None
         self.grid_type = "unknown"
         self._cache = {} # Cache for topology and spatial index
+        self._structured_fallback_messages = []
         self.angrot = 0.0
         self.xorigin = 0.0
         self.yorigin = 0.0
         self.is_absolute = False
+
+    def _record_structured_fallback_warning(self, message):
+        if message not in self._structured_fallback_messages:
+            self._structured_fallback_messages.append(message)
+
+    def consume_structured_fallback_warnings(self):
+        msgs = list(self._structured_fallback_messages)
+        self._structured_fallback_messages = []
+        return msgs
+
+    def _detect_absolute_coords(self, x_vals, y_vals=None):
+        """Heuristic for datasets that already store world coordinates."""
+        if self.angrot != 0:
+            # Rotated nlmod grids should be transformed; do not auto-mark absolute.
+            return False
+        if self.xorigin == 0 and self.yorigin == 0:
+            return False
+
+        try:
+            xv = np.asarray(x_vals, dtype=float).ravel()
+            xv = xv[np.isfinite(xv)]
+            if xv.size == 0:
+                return False
+
+            yv = None
+            if y_vals is not None:
+                yv = np.asarray(y_vals, dtype=float).ravel()
+                yv = yv[np.isfinite(yv)]
+                if yv.size == 0:
+                    yv = None
+
+            mean_x = float(np.nanmean(xv))
+            close_to_xorigin = np.abs(mean_x - self.xorigin) < np.abs(mean_x)
+
+            if yv is None:
+                return bool(close_to_xorigin)
+
+            mean_y = float(np.nanmean(yv))
+            close_to_yorigin = np.abs(mean_y - self.yorigin) < np.abs(mean_y)
+            return bool(close_to_xorigin and close_to_yorigin)
+        except Exception:
+            return False
+
+    def _log_qgis_message(self, message, level='info'):
+        """Best-effort QGIS logging that is safe outside QGIS runtime."""
+        try:
+            from qgis.core import QgsMessageLog, Qgis
+            level_map = {
+                'info': Qgis.Info,
+                'warning': Qgis.Warning,
+                'critical': Qgis.Critical,
+            }
+            QgsMessageLog.logMessage(message, "NLMOD Viewer", level_map.get(level, Qgis.Info))
+        except Exception:
+            pass
+
+    def _normalize_structured_axes(self, x_vals, y_vals, context='structured'):
+        """Returns 1D x/y axes for affine approximations on structured grids."""
+        x_arr = np.asarray(x_vals, dtype=float)
+        y_arr = np.asarray(y_vals, dtype=float)
+
+        if x_arr.ndim == 1 and y_arr.ndim == 1:
+            return x_arr, y_arr
+
+        if x_arr.ndim == 2 and y_arr.ndim == 2 and x_arr.shape == y_arr.shape:
+            msg = f"NLMOD: {context}: 2D coordinate arrays detected (e.g. variable delr/delc). Using best-effort affine from row/column means."
+            self._record_structured_fallback_warning(msg)
+            self._log_qgis_message(msg, 'warning')
+            x_axis = np.nanmean(x_arr, axis=0)
+            y_axis = np.nanmean(y_arr, axis=1)
+            return x_axis, y_axis
+
+        msg = f"NLMOD: {context}: unsupported coordinate array shapes x={x_arr.shape}, y={y_arr.shape}. Using unique sorted coordinates as fallback."
+        self._record_structured_fallback_warning(msg)
+        self._log_qgis_message(msg, 'warning')
+
+        x_flat = x_arr[np.isfinite(x_arr)]
+        y_flat = y_arr[np.isfinite(y_arr)]
+        if x_flat.size < 2 or y_flat.size < 2:
+            return None, None
+
+        return np.unique(np.sort(x_flat)), np.unique(np.sort(y_flat))
+
+    def _estimate_axis_spacing(self, axis_vals, axis_name='axis', context='structured'):
+        """Estimate representative cell size for possibly irregular axes."""
+        axis = np.asarray(axis_vals, dtype=float)
+        if axis.size < 2:
+            return 1.0
+
+        diffs = np.abs(np.diff(axis))
+        diffs = diffs[np.isfinite(diffs)]
+        diffs = diffs[diffs > 0]
+        if diffs.size == 0:
+            return 1.0
+
+        if not np.allclose(diffs, diffs[0], rtol=1e-4, atol=1e-9):
+            msg = f"NLMOD: {context}: non-uniform {axis_name} spacing detected. Using median spacing for best-effort rendering."
+            self._record_structured_fallback_warning(msg)
+            self._log_qgis_message(msg, 'warning')
+
+        return float(np.nanmedian(diffs))
 
     def open(self):
         if not os.path.exists(self.filepath):
@@ -56,19 +158,30 @@ class NetcdfHandler:
             
             # Detect if coordinates are already absolute
             self.is_absolute = False
-            if self.xorigin != 0 or self.yorigin != 0:
-                import numpy as np
-                xc_test = None
-                if 'x' in self.ds.variables and self.ds.variables['x'].ndim == 1:
-                    xc_test = self.ds.variables['x'][:]
-                elif 'xc' in self.ds.variables:
-                    xc_test = self.ds.variables['xc'][:]
-                
-                if xc_test is not None:
-                    mean_x = np.nanmean(xc_test)
-                    # If mean coordinate is closer to xorigin than to 0, it's absolute
-                    if np.abs(mean_x) > np.abs(self.xorigin) * 0.5:
-                        self.is_absolute = True
+            x_test = None
+            y_test = None
+            if 'x' in self.ds.variables and self.ds.variables['x'].ndim == 1:
+                x_test = self.ds.variables['x'][:]
+                if 'y' in self.ds.variables and self.ds.variables['y'].ndim == 1:
+                    y_test = self.ds.variables['y'][:]
+            elif 'xc' in self.ds.variables:
+                x_test = self.ds.variables['xc'][:]
+                if 'yc' in self.ds.variables:
+                    y_test = self.ds.variables['yc'][:]
+
+            if x_test is not None:
+                self.is_absolute = self._detect_absolute_coords(x_test, y_test)
+
+            # Helpful for diagnosing shifted/rotated render behavior per dataset.
+            try:
+                from qgis.core import QgsMessageLog, Qgis
+                QgsMessageLog.logMessage(
+                    f"NLMOD: Transform detection -> is_absolute={self.is_absolute}, angrot={self.angrot}, xorigin={self.xorigin}, yorigin={self.yorigin}",
+                    "NLMOD Viewer",
+                    Qgis.Info,
+                )
+            except Exception:
+                pass
             
             return True, ""
         except ImportError:
@@ -81,6 +194,7 @@ class NetcdfHandler:
             self.ds.close()
             self.ds = None
         self._cache = {} # Clear cache
+        self._structured_fallback_messages = []
         self.angrot = 0.0
         self.xorigin = 0.0
         self.yorigin = 0.0
@@ -190,22 +304,21 @@ class NetcdfHandler:
         
         if x_var is None: return None
         
-        x_vals, y_vals = x_var[:], y_var[:]
-        dx = np.abs(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else 1.0
-        dy = np.abs(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else 1.0
+        x_vals_raw, y_vals_raw = x_var[:], y_var[:]
+        x_vals, y_vals = self._normalize_structured_axes(x_vals_raw, y_vals_raw, context='get_geotransform')
+        if x_vals is None or y_vals is None or len(x_vals) < 2 or len(y_vals) < 2:
+            self._log_qgis_message("NLMOD: get_geotransform: could not derive structured axes.", 'warning')
+            return None
+
+        dx = self._estimate_axis_spacing(x_vals, axis_name='x', context='get_geotransform')
+        dy = self._estimate_axis_spacing(y_vals, axis_name='y', context='get_geotransform')
         
         # Model space limits (bottom-left origin)
         xm_min = np.min(x_vals) - dx/2
         ym_max = np.max(y_vals) + dy/2
         
         # 2. Transform model top-left (xm_min, ym_max) to world space top-left
-        # Detect if coordinates are already absolute
-        is_absolute = False
-        if self.xorigin != 0 or self.yorigin != 0:
-            if np.abs(xm_min + dx/2) > np.abs(self.xorigin) * 0.5:
-                is_absolute = True
-
-        if not is_absolute:
+        if not self.is_absolute:
             # Rotation angle in radians
             a = np.radians(self.angrot)
             cosa = np.cos(a)
@@ -494,7 +607,7 @@ class NetcdfHandler:
                                 x_cand = c
                             if 'y' in c_name or 'lat' in c_name or 'projection_y_coordinate' in std_name:
                                 y_cand = c
-                        if x_cand and y_cand:
+                        if x_cand is not None and y_cand is not None:
                             x_var = x_cand
                             y_var = y_cand
                             QgsMessageLog.logMessage(f"NLMOD: Found coordinates via attribute: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.Info)
@@ -507,8 +620,8 @@ class NetcdfHandler:
                         x_var = v
                     if 'projection_y_coordinate' in std_name or 'latitude' in std_name:
                         y_var = v
-                if x_var and y_var:
-                     QgsMessageLog.logMessage(f"NLMOD: Found coordinates via standard_name: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.Info)
+                if x_var is not None and y_var is not None:
+                    QgsMessageLog.logMessage(f"NLMOD: Found coordinates via standard_name: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.Info)
 
             # Strategy 3: Common names (fallback)
             if x_var is None:
@@ -535,7 +648,13 @@ class NetcdfHandler:
                 return None
             
             # Use detected coords to determine direction
-            y_vals = y_var[:]
+            x_vals_raw = x_var[:]
+            y_vals_raw = y_var[:]
+            x_vals, y_vals = self._normalize_structured_axes(x_vals_raw, y_vals_raw, context='get_extent')
+            if x_vals is None or y_vals is None:
+                QgsMessageLog.logMessage("NLMOD: Could not normalize structured coordinate axes.", "NLMOD Viewer", Qgis.Warning)
+                return None
+
             if len(y_vals) >= 2:
                 y_is_ascending = (y_vals[1] > y_vals[0])
                 QgsMessageLog.logMessage(f"NLMOD: Detected Y direction: {y_vals[0]} to {y_vals[-1]} (Ascending={y_is_ascending})", "NLMOD Viewer", Qgis.Info)
@@ -550,7 +669,7 @@ class NetcdfHandler:
                      return (ext[0], ext[1], ext[2], ext[3], y_is_ascending)
 
             # Otherwise calculate bounds from coords
-            x = x_var[:]
+            x = x_vals
             y = y_vals
             
             if len(x) < 2 or len(y) < 2:
@@ -558,8 +677,8 @@ class NetcdfHandler:
                 return None
                 
             # Determine cell sizes (dx, dy)
-            dx = np.abs(x[1] - x[0])
-            dy = np.abs(y[1] - y[0])
+            dx = self._estimate_axis_spacing(x, axis_name='x', context='get_extent')
+            dy = self._estimate_axis_spacing(y, axis_name='y', context='get_extent')
             
             # Model space bounds
             xm_min = np.min(x) - dx/2
@@ -568,13 +687,7 @@ class NetcdfHandler:
             ym_max = np.max(y) + dy/2
             
             # Now transform corners if rotated or moved from QGIS 0,0
-            # Detect if already absolute
-            is_absolute = False
-            if self.xorigin != 0 or self.yorigin != 0:
-                if np.nanmean(np.abs(x)) > np.abs(self.xorigin) * 0.5:
-                    is_absolute = True
-
-            if (self.angrot == 0 and self.xorigin == 0 and self.yorigin == 0) or is_absolute:
+            if (self.angrot == 0 and self.xorigin == 0 and self.yorigin == 0) or self.is_absolute:
                 return (xm_min, xm_max, ym_min, ym_max, y_is_ascending)
             
             # Calculate 4 corners in model space and transform
@@ -632,15 +745,8 @@ class NetcdfHandler:
             xc_vals = self.ds.variables['xc'][:]
             yc_vals = self.ds.variables['yc'][:]
             
-            # Apply transformation if necessary (and if not already absolute)
-            # Heuristic: if mean xc is much larger than its range, and near xorigin, it's likely absolute.
-            is_absolute = False
-            if self.xorigin != 0 or self.yorigin != 0:
-                mean_x = np.nanmean(xc_vals)
-                if np.abs(mean_x) > np.abs(self.xorigin) * 0.5:
-                    is_absolute = True
-
-            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_absolute:
+            # Apply transformation if necessary.
+            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not self.is_absolute:
                 xc_trans, yc_trans = self.transform_model_to_world(xc_vals, yc_vals)
                 res = (xc_trans, yc_trans)
             else:
@@ -655,14 +761,8 @@ class NetcdfHandler:
         yv = self._get_topology_var('yv')
         
         if icv is not None and xv is not None and yv is not None:
-            # Detect if vertices are absolute
-            is_absolute = False
-            if self.xorigin != 0 or self.yorigin != 0:
-                if np.nanmean(np.abs(xv)) > np.abs(self.xorigin) * 0.5:
-                    is_absolute = True
-
             # First transform vertices to world space if necessary
-            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_absolute:
+            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not self.is_absolute:
                 xv_world, yv_world = self.transform_model_to_world(xv, yv)
             else:
                 xv_world, yv_world = xv, yv
@@ -764,12 +864,7 @@ class NetcdfHandler:
                         # Distances along line are calculated in model space (invariant)
                         for d1, d2 in self._get_line_segment_ranges(line_model, inter):
                             # Cell centroids for display (transformed to world space if not absolute)
-                            is_absolute = False
-                            if self.xorigin != 0 or self.yorigin != 0:
-                                if np.abs(xc) > np.abs(self.xorigin) * 0.5:
-                                    is_absolute = True
-                                    
-                            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_absolute:
+                            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not self.is_absolute:
                                 cw_x, cw_y = self.transform_model_to_world(xc, yc)
                             else:
                                 cw_x, cw_y = xc, yc

@@ -297,6 +297,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.auto_update_layer = False
         self.auto_update_time = False
         self.auto_update_color = True
+        self._shown_structured_fallback_popup = False
         
         self.is_restoring = True  # Start in restoring mode to prevent overwrites
         # Signal connection moved to end of restore_state_from_project
@@ -312,6 +313,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def open_netcdf(self, filepath):
         if self.handler:
             self.handler.close()
+        self._shown_structured_fallback_popup = False
         
         self.handler = NetcdfHandler(filepath)
         success, msg = self.handler.open()
@@ -718,6 +720,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             try:
                 geotransform = self.handler.get_geotransform(var_name)
                 extent = self.handler.get_extent(var_name)
+
+                fallback_msgs = self.handler.consume_structured_fallback_warnings()
+                if fallback_msgs and not self._shown_structured_fallback_popup:
+                    self._shown_structured_fallback_popup = True
+                    txt = "\n".join(fallback_msgs)
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Structured Grid Warning",
+                        "This dataset uses non-standard structured coordinates (e.g. 2D/irregular delr-delc style).\n"
+                        "The plugin will render using a best-effort approximation.\n\n"
+                        f"Details:\n{txt}",
+                    )
                 
                 if geotransform and extent:
                     from osgeo import gdal
@@ -1165,7 +1179,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
                                z_range=None, x_range=None, v_range=None, visible=True,
                                show_layers=True, show_cells=False, show_layer_names=True, use_log=False,
-                               cmap_name='Turbo', invert_cmap=False, time_idx=None):
+                               cmap_name='Turbo', invert_cmap=False, time_idx=None, selected_layers=None):
         """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
             return
@@ -1228,7 +1242,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 label=cs_label, points=points, z_range=z_range, x_range=x_range, v_range=v_range,
                 show_layers=show_layers, show_cells=show_cells, show_layer_names=show_layer_names,
                 use_log=use_log, cmap_name=cmap_name, invert_cmap=invert_cmap,
-                time_values=time_values, time_idx=time_idx
+                time_values=time_values, time_idx=time_idx, selected_layers=selected_layers
             )
             win.variable_changed.connect(self.update_cs_list_label)
             win.cursor_moved.connect(self.on_cs_cursor_moved)
@@ -1236,6 +1250,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win.range_changed.connect(self.save_state_to_project)
             win.visibilityChanged.connect(self.save_state_to_project)
             win.settings_changed.connect(self.save_state_to_project)
+            win.layers_changed.connect(lambda id, _layers: self.save_state_to_project())
+            win.layers_changed.connect(lambda id, _layers: self.sync_ts_on_cross_sections())
             win.sigPointPicked.connect(self.on_cs_point_picked)
             win.variable_changed.connect(lambda id, v: self.sync_ts_on_cross_sections())
             
@@ -1589,6 +1605,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     
                     # For each selected layer in TS
                     for i, lyr_idx in enumerate(ts_win.layer_indices):
+                        if hasattr(cs_win, 'is_layer_visible') and not cs_win.is_layer_visible(lyr_idx):
+                            continue
                         if lyr_idx < rendered_botm.shape[0]:
                             l_top = rendered_top[m_idx] if lyr_idx == 0 else rendered_botm[lyr_idx-1, m_idx]
                             l_bot = rendered_botm[lyr_idx, m_idx]
@@ -2207,6 +2225,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     'label': win.cs_label,
                     'variable': win.current_var,
                     'head_variable': win.current_head_var,
+                    'selected_layers': list(getattr(win, 'selected_layer_indices', [])),
                     'time_idx': win.current_time_idx,
                     'points': [(float(p.x()), float(p.y())) for p in points],
                     'z_range': (float(view_range[1][0]), float(view_range[1][1])),
@@ -2306,7 +2325,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             use_log=cs.get('use_log', False),
                             cmap_name=cs.get('cmap', 'Turbo'),
                             invert_cmap=cs.get('invert_cmap', False),
-                            time_idx=cs.get('time_idx', 0)
+                            time_idx=cs.get('time_idx', 0),
+                            selected_layers=cs.get('selected_layers')
                         )
                         # Set head variable if it was saved
                         if win and cs.get('head_variable'):
