@@ -13,6 +13,7 @@ import subprocess
 import os
 import sys
 import glob
+import site
 import tempfile
 import json
 import time as py_time
@@ -587,6 +588,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         finally:
             progress.close()
 
+        # Refresh runtime import paths after pip install so packages can often be
+        # imported immediately without restarting QGIS.
+        self._refresh_python_import_state(import_name)
+
         if not self._is_package_importable(import_name):
             self._show_install_failure(
                 package_name,
@@ -653,6 +658,50 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return True
         except ImportError:
             return False
+
+    def _refresh_python_import_state(self, import_name):
+        """Refresh site paths and import caches so newly installed packages are discoverable."""
+        path_candidates = []
+
+        try:
+            user_site = site.getusersitepackages()
+            if isinstance(user_site, str):
+                path_candidates.append(user_site)
+            elif isinstance(user_site, (list, tuple)):
+                path_candidates.extend(user_site)
+        except Exception:
+            pass
+
+        try:
+            for sp in site.getsitepackages():
+                path_candidates.append(sp)
+        except Exception:
+            pass
+
+        for p in path_candidates:
+            try:
+                if p and os.path.isdir(p):
+                    site.addsitedir(p)
+            except Exception:
+                pass
+
+        # Remove failed/partial imports so a fresh import attempt is possible.
+        if import_name in sys.modules:
+            try:
+                del sys.modules[import_name]
+            except Exception:
+                pass
+
+        # netCDF4 can leave submodules in a partial state after a failed import.
+        if import_name == 'netCDF4':
+            stale = [m for m in list(sys.modules.keys()) if m == 'netCDF4' or m.startswith('netCDF4.')]
+            for m in stale:
+                try:
+                    del sys.modules[m]
+                except Exception:
+                    pass
+
+        importlib.invalidate_caches()
 
     def _show_install_failure(self, package_name, details):
         msg_box = QtWidgets.QMessageBox(self)
