@@ -12,6 +12,7 @@ import importlib
 import subprocess
 import os
 import sys
+import glob
 import tempfile
 import json
 import time as py_time
@@ -551,9 +552,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         progress.show()
         QtWidgets.QApplication.processEvents()
 
+        python_executable = self._find_qgis_python_executable()
+        if not python_executable:
+            progress.close()
+            self._show_install_failure(
+                package_name,
+                "Could not find the Python interpreter used by QGIS."
+            )
+            return False
+
         commands = [
-            [sys.executable, '-m', 'pip', 'install', '--user', package_name],
-            [sys.executable, '-m', 'pip', 'install', package_name],
+            [python_executable, '-m', 'pip', 'install', '--user', package_name],
+            [python_executable, '-m', 'pip', 'install', package_name],
         ]
         install_output = ""
 
@@ -586,6 +596,52 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return False
 
         return True
+
+    def _find_qgis_python_executable(self):
+        candidates = []
+        seen = set()
+
+        def add_candidate(path):
+            if not path:
+                return
+            normalized = os.path.normpath(path)
+            if normalized in seen:
+                return
+            seen.add(normalized)
+            candidates.append(normalized)
+
+        exe_name = os.path.basename(sys.executable).lower()
+        if exe_name.startswith('python'):
+            add_candidate(sys.executable)
+
+        for env_key in ('PYTHONHOME', 'OSGEO4W_ROOT'):
+            env_value = os.environ.get(env_key)
+            if env_value:
+                add_candidate(os.path.join(env_value, 'python.exe'))
+                add_candidate(os.path.join(env_value, 'python3.exe'))
+                add_candidate(os.path.join(env_value, 'bin', 'python.exe'))
+                add_candidate(os.path.join(env_value, 'bin', 'python3.exe'))
+                add_candidate(os.path.join(env_value, 'apps', 'Python', 'python.exe'))
+                for match in glob.glob(os.path.join(env_value, 'apps', 'Python*', 'python.exe')):
+                    add_candidate(match)
+
+        for prefix in (sys.prefix, sys.exec_prefix, os.path.dirname(sys.executable), os.path.dirname(os.path.dirname(sys.executable))):
+            if not prefix:
+                continue
+            add_candidate(os.path.join(prefix, 'python.exe'))
+            add_candidate(os.path.join(prefix, 'python3.exe'))
+            add_candidate(os.path.join(prefix, 'bin', 'python.exe'))
+            add_candidate(os.path.join(prefix, 'bin', 'python3.exe'))
+            for match in glob.glob(os.path.join(prefix, 'Python*', 'python.exe')):
+                add_candidate(match)
+            for match in glob.glob(os.path.join(prefix, 'apps', 'Python*', 'python.exe')):
+                add_candidate(match)
+
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+
+        return None
 
     def _is_package_importable(self, import_name):
         if import_name == 'netCDF4':
