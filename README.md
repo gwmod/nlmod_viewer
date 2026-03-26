@@ -40,14 +40,8 @@ This means when you save your QGIS project and reopen it later, your entire anal
 ### Dependencies
 
 - **QGIS 3.x**
-- **Python `netCDF4` library**: Usually included in QGIS (OSGeo4W). If missing, install via OSGeo4W Shell:
-  ```bash
-  pip install netCDF4
-  ```
-- **Optional**: `pyqtgraph` for cross-section plotting:
-  ```bash
-  pip install pyqtgraph
-  ```
+- **Python `netCDF4` library**: Usually included in QGIS. If it is missing, the plugin now offers to install it automatically in the QGIS Python environment when you open a NetCDF file.
+- **Python `pyqtgraph` library**: Required for cross-section and time-series plotting. If it is missing, the plugin now offers to install it automatically in the QGIS Python environment when you open a plot window.
 
 ### Map Layer Visualization
 

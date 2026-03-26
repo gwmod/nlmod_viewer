@@ -172,7 +172,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
     def change_variable(self, var_name):
         if not self.data_fetcher: return
         try:
-            new_data = self.data_fetcher(var_name, self.point, self.layer_indices)
+            new_data = self.data_fetcher(var_name, self.point, self.layer_indices, force_prompt=True)
             if new_data:
                 if "error" in new_data:
                     QtWidgets.QMessageBox.warning(self, "Data Error", new_data['error'])

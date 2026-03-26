@@ -1,10 +1,12 @@
+import importlib
+import os
+import numpy as np
+
 try:
     import netCDF4
 except ImportError:
     netCDF4 = None
 
-import os
-import numpy as np
 try:
     from scipy.spatial import cKDTree
 except ImportError:
@@ -16,6 +18,23 @@ try:
     from shapely import STRtree, intersection, line_locate_point, get_coordinates, box
 except ImportError:
     shapely = None
+
+NETCDF4_MISSING_MESSAGE = "The 'netCDF4' library is missing from the QGIS Python environment."
+
+
+def ensure_netcdf4():
+    """Imports netCDF4 lazily so the plugin can retry after installing it."""
+    global netCDF4
+    if netCDF4 is not None:
+        return netCDF4
+
+    try:
+        importlib.invalidate_caches()
+        netCDF4 = importlib.import_module('netCDF4')
+    except ImportError:
+        netCDF4 = None
+
+    return netCDF4
 
 class NetcdfHandler:
     def _get_topology_var(self, name):
@@ -31,6 +50,7 @@ class NetcdfHandler:
     def __init__(self, filepath):
         self.filepath = filepath
         self.ds = None
+        self.last_error_code = None
         self.grid_type = "unknown"
         self._cache = {} # Cache for topology and spatial index
         self._structured_fallback_messages = []
@@ -141,10 +161,12 @@ class NetcdfHandler:
         return float(np.nanmedian(diffs))
 
     def open(self):
+        self.last_error_code = None
         if not os.path.exists(self.filepath):
+            self.last_error_code = "file-not-found"
             return False, "File not found"
         try:
-            if netCDF4 is None:
+            if ensure_netcdf4() is None:
                 raise ImportError("netCDF4 module not found")
                 
             self.ds = netCDF4.Dataset(self.filepath, 'r')
@@ -185,8 +207,10 @@ class NetcdfHandler:
             
             return True, ""
         except ImportError:
-            return False, "The 'netCDF4' library is missing.\n\nPlease install it using the OSGeo4W Shell:\n  pip install netCDF4"
+            self.last_error_code = "missing-netcdf4"
+            return False, NETCDF4_MISSING_MESSAGE
         except Exception as e:
+            self.last_error_code = "open-failed"
             return False, f"Error opening file: {str(e)}"
 
     def close(self):
@@ -571,6 +595,31 @@ class NetcdfHandler:
             })
         return data_vars
 
+    def get_extra_dimensions(self, var_name):
+        """
+        Returns a list of extra dimensions for a variable — i.e. every dimension that is
+        NOT the time dim, layer/z dim, or spatial dim (icell2d / x / y).
+        Each entry: {'dim_name': str, 'size': int, 'values': [str]}
+        Returns [] when there are no extra dimensions.
+        """
+        if not self.ds or var_name not in self.ds.variables:
+            return []
+        var = self.ds.variables[var_name]
+        known_dims = {'time', 'layer', 'z', 'icell2d', 'x', 'y',
+                      'layer_index', 'lev', 'k', 'lat', 'lon', 'latitude', 'longitude'}
+        extra = []
+        for d in var.dimensions:
+            if d.lower() in known_dims:
+                continue
+            size = self.ds.dimensions[d].size
+            # Try to read human-readable labels from a coordinate variable
+            if d in self.ds.variables:
+                raw = self.ds.variables[d][:]
+                values = [str(v) for v in raw]
+            else:
+                values = [str(i) for i in range(size)]
+            extra.append({'dim_name': d, 'size': size, 'values': values})
+        return extra
 
 
     def get_extent(self, var_name=None):
@@ -814,9 +863,10 @@ class NetcdfHandler:
                 ranges.append((min(d1, d2), max(d1, d2)))
         return ranges
 
-    def get_cross_section_data(self, variable_name, points, time_idx=0):
+    def get_cross_section_data(self, variable_name, points, time_idx=0, extra_dim_indices=None):
         """
         Extracts cross-section data using exact Shapely intersections with cell geometries.
+        extra_dim_indices: dict mapping extra dimension names to integer indices.
         """
         if not self.ds:
             return None
@@ -984,6 +1034,12 @@ class NetcdfHandler:
                         if dim_name in possible_times:
                             sl[i] = time_idx
                             break
+
+                    # Apply extra user-specified dimensions (only for the data variable)
+                    if extra_dim_indices and v == variable_name:
+                        for i, dim_name in enumerate(dims):
+                            if dim_name in extra_dim_indices:
+                                sl[i] = int(extra_dim_indices[dim_name])
                     
                     # Structured: extract the spatial sub-region (sy, sx)
                     # and all layers.
@@ -1029,6 +1085,12 @@ class NetcdfHandler:
                         if dim_name in possible_times:
                             sl[i] = time_idx
                             break
+
+                    # Apply extra user-specified dimensions (only for the data variable)
+                    if extra_dim_indices and v == variable_name:
+                        for i, dim_name in enumerate(dims):
+                            if dim_name in extra_dim_indices:
+                                sl[i] = int(extra_dim_indices[dim_name])
                     
                     # Apply icell2d selections
                     if 'icell2d' in dims:
@@ -1085,10 +1147,11 @@ class NetcdfHandler:
             import traceback
             return {"error": f"Data extraction failed: {str(e)}\n{traceback.format_exc()}"}
 
-    def export_to_mesh(self, var_name, layer_idx=0, time_idx=0, output_path=None):
+    def export_to_mesh(self, var_name, layer_idx=0, time_idx=0, output_path=None, extra_dim_indices=None):
         """
         Exports a single variable (at a specific layer and time) to a clean UGRID NetCDF file.
         This provides maximal compatibility with MDAL.
+        extra_dim_indices: dict mapping extra dimension names to integer indices.
         """
         if not self.ds or var_name not in self.ds.variables:
             return False, "Variable not found"
@@ -1121,6 +1184,12 @@ class NetcdfHandler:
                 if d in possible_times:
                     sl[i] = time_idx
                     break
+
+            # Handle extra (user-specified) dimensions
+            if extra_dim_indices:
+                for i, d in enumerate(dims):
+                    if d in extra_dim_indices:
+                        sl[i] = int(extra_dim_indices[d])
             
             data = var[tuple(sl)]
             
@@ -1227,7 +1296,7 @@ class NetcdfHandler:
             import traceback
             return False, f"Export failed: {str(e)}\n{traceback.format_exc()}"
 
-    def get_timeseries_data(self, var_name, world_pt, layer_indices=None):
+    def get_timeseries_data(self, var_name, world_pt, layer_indices=None, extra_dim_indices=None):
         """
         Extracts time series data at a point for one or more layers.
         world_pt should be QgsPointXY or (x, y) in world coordinates.
@@ -1364,6 +1433,12 @@ class NetcdfHandler:
             if layer_dim_idx is not None:
                 if lyr >= len(layer_names): continue
                 sl[layer_dim_idx] = lyr
+
+            # Apply extra user-specified dimensions
+            if extra_dim_indices:
+                for i, d in enumerate(dims):
+                    if d in extra_dim_indices:
+                        sl[i] = int(extra_dim_indices[d])
             
             if self.grid_type == 'structured':
                 sl[-2] = cell_idx[0]
@@ -1381,7 +1456,7 @@ class NetcdfHandler:
             
         return results
 
-    def get_variable_stats(self, var_name, layer_idx=0, time_idx=0):
+    def get_variable_stats(self, var_name, layer_idx=0, time_idx=0, extra_dim_indices=None):
         """Returns the min and max values for a specific variable slice."""
         if not self.ds or var_name not in self.ds.variables:
             return {"min": 0.0, "max": 1.0}
@@ -1401,6 +1476,12 @@ class NetcdfHandler:
                     sl[i] = layer_idx
                 elif d.lower() in possible_times:
                     sl[i] = time_idx
+
+            # Apply extra user-specified dimensions
+            if extra_dim_indices:
+                for i, d in enumerate(dims):
+                    if d in extra_dim_indices:
+                        sl[i] = int(extra_dim_indices[d])
             
             data = var[tuple(sl)]
             

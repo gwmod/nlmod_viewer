@@ -568,7 +568,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             
         try:
             # Fetch new data with current time
-            new_data = self.data_fetcher(var_name, self.points, time_idx=self.current_time_idx)
+            new_data = self.data_fetcher(var_name, self.points, time_idx=self.current_time_idx, force_prompt=True)
             if new_data:
                 if "error" in new_data:
                     QtWidgets.QMessageBox.warning(self, "Data Error", new_data['error'])
@@ -605,7 +605,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.head_data = None
         else:
             try:
-                self.head_data = self.data_fetcher(head_var_name, self.points, time_idx=self.current_time_idx)
+                self.head_data = self.data_fetcher(head_var_name, self.points, time_idx=self.current_time_idx, force_prompt=True)
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Data Error", f"Failed to fetch head data for {head_var_name}: {e}")
                 self.head_data = "Error"

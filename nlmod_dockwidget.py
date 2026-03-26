@@ -6,15 +6,20 @@ from qgis.core import (
     QgsMeshRendererScalarSettings, QgsMeshDatasetIndex, QgsMeshRendererSettings,
     QgsRectangle
 )
+from . import netcdf_handler as netcdf_handler_module
 from .netcdf_handler import NetcdfHandler
+import importlib
+import subprocess
 import os
+import sys
 import tempfile
 import json
 import time as py_time
-from .time_series_plot import TimeSeriesPlotWindow
 from .time_series_tool import TimeSeriesMapTool
 from qgis.PyQt.QtCore import Qt, pyqtSignal, QPointF
 from qgis.core import QgsPointXY, QgsGeometry, QgsWkbTypes
+
+TIME_SERIES_COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
 class VertexEditorDialog(QtWidgets.QDialog):
     def __init__(self, points, parent=None):
@@ -121,6 +126,47 @@ class MainSettingsDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
+
+class ExtraDimensionDialog(QtWidgets.QDialog):
+    """Dialog that lets the user choose an index for each extra (non-standard) dimension."""
+
+    def __init__(self, extra_dims, current_selections=None, parent=None):
+        """
+        extra_dims: list of {'dim_name': str, 'size': int, 'values': [str]}
+        current_selections: dict dim_name -> int (pre-fill combo boxes)
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Select Dimension Values")
+        self.setModal(True)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(
+            "This variable has extra dimensions.\n"
+            "Please select the value to plot for each one:"))
+
+        self._combos = {}
+        form = QtWidgets.QFormLayout()
+        for dim_info in extra_dims:
+            dim_name = dim_info['dim_name']
+            combo = QtWidgets.QComboBox()
+            combo.addItems(dim_info['values'])
+            pre = (current_selections or {}).get(dim_name, 0)
+            combo.setCurrentIndex(max(0, min(pre, len(dim_info['values']) - 1)))
+            form.addRow(dim_name + ':', combo)
+            self._combos[dim_name] = combo
+        layout.addLayout(form)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal, self)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def get_selections(self):
+        """Returns {dim_name: int_index} for each extra dimension."""
+        return {dim_name: combo.currentIndex() for dim_name, combo in self._combos.items()}
+
+
 class NlmodDockWidget(QtWidgets.QDockWidget):
     def __init__(self, parent=None, iface=None):
         super(NlmodDockWidget, self).__init__(parent)
@@ -136,24 +182,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # File Selection / Select Data Group
         file_group = QtWidgets.QGroupBox("Select Data")
         file_layout = QtWidgets.QVBoxLayout()
-        h_layout = QtWidgets.QHBoxLayout()
         self.file_edit = QtWidgets.QLineEdit()
+        file_layout.addWidget(self.file_edit)
+
+        btn_layout = QtWidgets.QHBoxLayout()
         self.browse_btn = QtWidgets.QPushButton("Browse...")
         self.browse_btn.clicked.connect(self.select_file)
-        h_layout.addWidget(self.file_edit)
-        h_layout.addWidget(self.browse_btn)
+        btn_layout.addWidget(self.browse_btn)
+
+        self.metadata_btn = QtWidgets.QPushButton("Metadata")
+        self.metadata_btn.clicked.connect(self.show_metadata_dialog)
+        btn_layout.addWidget(self.metadata_btn)
         
         self.settings_btn = QtWidgets.QPushButton("Settings...")
         self.settings_btn.clicked.connect(self.show_settings)
-        h_layout.addWidget(self.settings_btn)
+        btn_layout.addWidget(self.settings_btn)
         
-        file_layout.addLayout(h_layout)
-        
-        # Metadata / Info Area
-        self.info_text = QtWidgets.QTextBrowser()
-        self.info_text.setMaximumHeight(100)
-        file_layout.addWidget(QtWidgets.QLabel("Metadata:"))
-        file_layout.addWidget(self.info_text)
+        file_layout.addLayout(btn_layout)
         
         # Ensure the group stays compact if given more space
         file_layout.addStretch()
@@ -299,6 +344,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.auto_update_time = False
         self.auto_update_color = True
         self._shown_structured_fallback_popup = False
+        self._extra_dim_selections = {}  # var_name -> {dim_name: int_index}
         
         self.is_restoring = True  # Start in restoring mode to prevent overwrites
         # Signal connection moved to end of restore_state_from_project
@@ -392,17 +438,19 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if self.handler:
             self.handler.close()
         self._shown_structured_fallback_popup = False
+        self._extra_dim_selections = {}
         
         self.handler = NetcdfHandler(filepath)
         success, msg = self.handler.open()
+
+        if (not success and self.handler.last_error_code == 'missing-netcdf4'
+                and self._prompt_install_netcdf4()):
+            success, msg = self.handler.open()
         
         if not success:
-             self.info_text.setText(f"Error opening file:\n{msg}")
              self.var_list.clear()
              QtWidgets.QMessageBox.critical(self, "Open Error", msg)
              return
-        
-        self.info_text.setText(self.handler.get_info_text())
         
         # Populate Layers and Times globally
         dim_meta = self.handler.get_dimensions_metadata()
@@ -453,6 +501,139 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         self.save_state_to_project()
 
+    def _prompt_install_netcdf4(self):
+        return self._prompt_install_package(
+            package_name='netCDF4',
+            import_name='netCDF4',
+            prompt_title='Install netCDF4',
+            prompt_message=(
+                "The Python package 'netCDF4' is missing from the QGIS environment.\n\n"
+                "Install it automatically now using the QGIS Python interpreter?"
+            ),
+        )
+
+    def _prompt_install_pyqtgraph(self):
+        return self._prompt_install_package(
+            package_name='pyqtgraph',
+            import_name='pyqtgraph',
+            prompt_title='Install pyqtgraph',
+            prompt_message=(
+                "The Python package 'pyqtgraph' is required for plotting cross-sections and time series.\n\n"
+                "Install it automatically now using the QGIS Python interpreter?"
+            ),
+        )
+
+    def _prompt_install_package(self, package_name, import_name, prompt_title, prompt_message):
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            prompt_title,
+            prompt_message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return False
+
+        return self._install_package_in_qgis(package_name, import_name)
+
+    def _install_package_in_qgis(self, package_name, import_name):
+        progress = QtWidgets.QProgressDialog(
+            f"Installing '{package_name}' in the QGIS Python environment...",
+            None,
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle("Installing Dependency")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QtWidgets.QApplication.processEvents()
+
+        commands = [
+            [sys.executable, '-m', 'pip', 'install', '--user', package_name],
+            [sys.executable, '-m', 'pip', 'install', package_name],
+        ]
+        install_output = ""
+
+        try:
+            for command in commands:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                install_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+                if result.returncode == 0:
+                    break
+            else:
+                self._show_install_failure(package_name, install_output)
+                return False
+        except Exception as exc:
+            self._show_install_failure(package_name, str(exc))
+            return False
+        finally:
+            progress.close()
+
+        if not self._is_package_importable(import_name):
+            self._show_install_failure(
+                package_name,
+                f"{package_name} was installed, but QGIS could not import it in the current session.\n\n"
+                f"Installer output:\n{install_output}"
+            )
+            return False
+
+        return True
+
+    def _is_package_importable(self, import_name):
+        if import_name == 'netCDF4':
+            return netcdf_handler_module.ensure_netcdf4() is not None
+
+        try:
+            importlib.invalidate_caches()
+            importlib.import_module(import_name)
+            return True
+        except ImportError:
+            return False
+
+    def _show_install_failure(self, package_name, details):
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setIcon(QtWidgets.QMessageBox.Critical)
+        msg_box.setWindowTitle("Install Error")
+        msg_box.setText(f"Automatic installation of '{package_name}' failed.")
+        msg_box.setInformativeText(
+            f"You can retry from the plugin, or install it manually in the QGIS Python environment with 'python -m pip install {package_name}'."
+        )
+        if details:
+            msg_box.setDetailedText(details)
+        msg_box.exec_()
+
+    def _import_cross_section_plot_window(self):
+        try:
+            from .cross_section_plot import CrossSectionPlotWindow
+            return CrossSectionPlotWindow
+        except ImportError as exc:
+            if 'pyqtgraph' not in str(exc).lower():
+                raise
+            if not self._prompt_install_pyqtgraph():
+                return None
+            from .cross_section_plot import CrossSectionPlotWindow
+            return CrossSectionPlotWindow
+
+    def _import_time_series_plot_window(self):
+        try:
+            from .time_series_plot import TimeSeriesPlotWindow
+            return TimeSeriesPlotWindow
+        except ImportError as exc:
+            if 'pyqtgraph' not in str(exc).lower():
+                raise
+            if not self._prompt_install_pyqtgraph():
+                return None
+            from .time_series_plot import TimeSeriesPlotWindow
+            return TimeSeriesPlotWindow
+
     def find_variable_item_by_name(self, var_name):
         for i in range(self.var_list.count()):
             item = self.var_list.item(i)
@@ -467,12 +648,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.var_list.setCurrentItem(item)
         return True
 
-    def select_first_layer_variable(self):
+    def get_first_layer_variable_item(self):
         for i in range(self.var_list.count()):
             item = self.var_list.item(i)
             if item.data(QtCore.Qt.UserRole + 1):
-                self.var_list.setCurrentItem(item)
                 return item
+        return None
+
+    def select_first_layer_variable(self):
+        item = self.get_first_layer_variable_item()
+        if item is not None:
+            self.var_list.setCurrentItem(item)
+            return item
         return None
 
     def zoom_to_model_extent(self, var_name=None):
@@ -501,6 +688,29 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         canvas = self.iface.mapCanvas()
         canvas.setExtent(rect)
         canvas.refresh()
+
+    def get_extra_dim_indices_for_var(self, var_name, force_ask=False):
+        """
+        Returns a dict {dim_name: int_index} for any extra dimensions on *var_name*.
+        Returns {} when the variable has no extra dims.
+        Returns None when the user cancels the dialog.
+        When force_ask=True, always re-shows the dialog even if a selection is cached,
+        using the cached value as the default selection.
+        """
+        if not self.handler:
+            return {}
+        extra_dims = self.handler.get_extra_dimensions(var_name)
+        if not extra_dims:
+            return {}
+        current = self._extra_dim_selections.get(var_name)
+        if current is not None and not force_ask:
+            return current
+        dlg = ExtraDimensionDialog(extra_dims, current_selections=current, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None  # user cancelled
+        sel = dlg.get_selections()
+        self._extra_dim_selections[var_name] = sel
+        return sel
 
     def populate_vars(self):
         self.var_list.clear()
@@ -626,6 +836,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
             time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
 
+        # Resolve extra-dimension selections. Always re-show the dialog for plot actions,
+        # but prefill it with the previous selection for convenience.
+        extra_dim_indices = self.get_extra_dim_indices_for_var(var_name, force_ask=True)
+        if extra_dim_indices is None:
+            return  # user cancelled
+
         grid_type = self.handler.grid_type
         filepath = self.handler.filepath
         base_name = os.path.basename(filepath)
@@ -655,6 +871,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 time_suffix = f" [{self.time_values[time_idx]}]"
         
         display_name = f"{var_name}{layer_suffix}{time_suffix} @ {base_name}"
+
+        # Append extra-dimension label(s) to display name
+        if extra_dim_indices:
+            extra_strs = []
+            for dim_name, idx in extra_dim_indices.items():
+                extra_dims_info = self.handler.get_extra_dimensions(var_name)
+                dim_info = next((d for d in extra_dims_info if d['dim_name'] == dim_name), None)
+                label = dim_info['values'][idx] if dim_info else str(idx)
+                extra_strs.append(f"{dim_name}={label}")
+            display_name = f"{var_name}{layer_suffix}{time_suffix} [{', '.join(extra_strs)}] @ {base_name}"
         
         # Get consistent CRS from handler or default to RD New
         crs_def = self.handler.get_crs()
@@ -708,7 +934,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             timestamp = int(time.time() * 1000)
             temp_path = os.path.join(tempfile.gettempdir(), f"nlmod_mesh_{id(self)}_{timestamp}.nc")
             
-            success, msg = self.handler.export_to_mesh(var_name, layer_idx, time_idx, temp_path)
+            success, msg = self.handler.export_to_mesh(var_name, layer_idx, time_idx, temp_path,
+                                                       extra_dim_indices=extra_dim_indices)
             
             if not success:
                 QtWidgets.QMessageBox.warning(self, "Export Error", f"Failed to export mesh: {msg}")
@@ -739,7 +966,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     pass  # If capture fails, we'll just use default styling
 
             # Calculate actual min/max for the current selection
-            stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
+            stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx, extra_dim_indices=extra_dim_indices)
             v_min, v_max = stats['min'], stats['max']
             
             if existing_layer:
@@ -843,10 +1070,38 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     if d.lower() in ['layer', 'z', 'layer_index', 'lev', 'k']:
                         n_layers = self.handler.ds.dimensions[d].size
                         break
-            
-            # GDAL flattens NetCDF dimensions: band_idx = time_idx * n_layers + layer_idx + 1
-            band_idx = (time_idx * n_layers) + layer_idx + 1
-            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}] -> band={band_idx}", "NLMOD Viewer", Qgis.Info)
+
+            # GDAL flattens all non-spatial dimensions into bands in C order.
+            # For (time, layer, y, x): band = time_idx * n_layers + layer_idx + 1
+            # For extra dims, compute extra flat index using C-order stride.
+            extra_flat = 0
+            extra_stride = 1
+            if extra_dim_indices and self.handler and self.handler.ds and var_name in self.handler.ds.variables:
+                var_obj = self.handler.ds.variables[var_name]
+                # Walk dims in reverse to accumulate strides (C order = last dim varies fastest)
+                spatial = {'x', 'y', 'icell2d'}
+                known_handled = {'time', 'layer', 'z', 'layer_index', 'lev', 'k'}
+                extra_dim_sizes = []
+                extra_dim_idxs = []
+                for d in var_obj.dimensions:
+                    if d.lower() in spatial or d.lower() in known_handled:
+                        continue
+                    if d in extra_dim_indices:
+                        extra_dim_sizes.append(self.handler.ds.dimensions[d].size)
+                        extra_dim_idxs.append(int(extra_dim_indices[d]))
+                # Compute flat index in C-order
+                for k, (sz, ix) in enumerate(zip(extra_dim_sizes, extra_dim_idxs)):
+                    stride = 1
+                    for sz2 in extra_dim_sizes[k+1:]:
+                        stride *= sz2
+                    extra_flat += ix * stride
+                if extra_dim_sizes:
+                    for sz in extra_dim_sizes:
+                        extra_stride *= sz
+
+            # band_idx: (time_idx * extra_stride * n_layers) + (extra_flat * n_layers) + layer_idx + 1
+            band_idx = (time_idx * extra_stride * n_layers) + (extra_flat * n_layers) + layer_idx + 1
+            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}, extra={extra_dim_indices}] -> band={band_idx}", "NLMOD Viewer", Qgis.Info)
             
             safe_path = filepath.replace('\\', '/')
             # (Note: display_name is already calculated above)
@@ -940,7 +1195,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     QgsMessageLog.logMessage(f"NLMOD: Failed to capture style: {e}", "NLMOD Viewer", Qgis.Warning)
 
             # Calculate actual min/max for the current selection
-            stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx)
+            stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx, extra_dim_indices=extra_dim_indices)
             v_min, v_max = stats['min'], stats['max']
 
             if existing_layer:
@@ -1228,32 +1483,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.ts_tool.set_point(None)
                 self.ts_tool.can_add = False
 
-        # 1. Automatic variable selection if none is picked
         selected_items = self.var_list.selectedItems()
-        if not selected_items and self.handler and self.handler.ds:
-            possible_layer_dims = {'layer', 'z'}
-            found_idx = -1
-            for i in range(self.var_list.count()):
-                v_name = self.var_list.item(i).data(QtCore.Qt.UserRole)
-                if v_name in self.handler.ds.variables:
-                    v_dims = self.handler.ds.variables[v_name].dimensions
-                    if any(d in possible_layer_dims for d in v_dims):
-                        found_idx = i
-                        break
-            
-            if found_idx != -1:
-                self.var_list.setCurrentRow(found_idx)
-                selected_items = self.var_list.selectedItems()
+        item = selected_items[0] if selected_items else None
 
-        # Check if a variable is selected and has layer dimension
-        if not selected_items:
-            item = self.select_first_layer_variable()
+        if item is None:
+            item = self.get_first_layer_variable_item()
             if item is None:
                 QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
                 return
-            selected_items = [item]
-            
-        var_name = selected_items[0].data(QtCore.Qt.UserRole)
+        
+        var_name = item.data(QtCore.Qt.UserRole)
         
         # Final validation check
         if self.handler and self.handler.ds:
@@ -1267,7 +1506,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     break
             
             if not has_layer_dim:
-                item = self.select_first_layer_variable()
+                item = self.get_first_layer_variable_item()
                 if item is None:
                     QtWidgets.QMessageBox.information(
                         self,
@@ -1295,10 +1534,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Tool Error", f"Failed to start tool: {e}")
 
-    def fetch_cross_section_data(self, var_name, points, time_idx=None):
+    def fetch_cross_section_data(self, var_name, points, time_idx=None, force_prompt=False):
         """Callback for CrossSectionPlotWindow to fetch data."""
         if not self.handler:
             return None
+
+        extra_dim_indices = self.get_extra_dim_indices_for_var(var_name, force_ask=force_prompt)
+        if extra_dim_indices is None:
+            return {"error": "Selection cancelled."}
             
         if time_idx is None:
             time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
@@ -1316,7 +1559,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         except:
             pass
             
-        return self.handler.get_cross_section_data(var_name, points, time_idx=time_idx)
+        return self.handler.get_cross_section_data(var_name, points, time_idx=time_idx,
+                                extra_dim_indices=extra_dim_indices)
 
     def add_cross_section_plot(self, points, var_name, cs_label=None, item_id=None,
                                z_range=None, x_range=None, v_range=None, visible=True,
@@ -1325,6 +1569,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         """Creates a cross-section window and adds it to the UI/Map."""
         if not points or len(points) < 2:
             return
+
+        # Resolve extra-dimension selections. Always re-show the dialog for plot actions,
+        # but prefill it with the previous selection for convenience.
+        extra_dim_indices = self.get_extra_dim_indices_for_var(var_name, force_ask=True)
+        if extra_dim_indices is None:
+            return  # user cancelled
 
         # 1. Get all 3D variables for the combo box
         vars_3d = self.get_vars_3d()
@@ -1375,12 +1625,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if cs_label is None:
                 cs_label = self.get_next_cs_label()
             
-            from .cross_section_plot import CrossSectionPlotWindow
+            CrossSectionPlotWindow = self._import_cross_section_plot_window()
+            if CrossSectionPlotWindow is None:
+                return
             
             # 4. Show Window
+            def cs_data_fetcher(v, pts, time_idx=None, force_prompt=False):
+                return self.fetch_cross_section_data(v, pts, time_idx=time_idx, force_prompt=force_prompt)
+
             win = CrossSectionPlotWindow(
                 data, var_name, self, vertex_distances=v_dists,
-                item_id=item_id, all_vars=vars_3d, head_vars=all_vars, data_fetcher=self.fetch_cross_section_data,
+                item_id=item_id, all_vars=vars_3d, head_vars=all_vars, data_fetcher=cs_data_fetcher,
                 label=cs_label, points=points, z_range=z_range, x_range=x_range, v_range=v_range,
                 show_layers=show_layers, show_cells=show_cells, show_layer_names=show_layer_names,
                 use_log=use_log, cmap_name=cmap_name, invert_cmap=invert_cmap,
@@ -1448,11 +1703,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return
             
         selected_items = self.var_list.selectedItems()
-        if not selected_items:
-            QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
-            return
-            
-        var_name = selected_items[0].data(QtCore.Qt.UserRole)
+        item = selected_items[0] if selected_items else None
+        if item is None:
+            item = self.get_first_layer_variable_item()
+            if item is None:
+                QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
+                return
+
+        var_name = item.data(QtCore.Qt.UserRole)
+
+        if self.handler and self.handler.ds and var_name in self.handler.ds.variables:
+            possible_layer_dims = {'layer', 'z'}
+            if not any(dim in possible_layer_dims for dim in self.handler.ds.variables[var_name].dimensions):
+                item = self.get_first_layer_variable_item()
+                if item is None:
+                    QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
+                    return
+                var_name = item.data(QtCore.Qt.UserRole)
         
         # Restore previous map tool
         if self.prev_map_tool:
@@ -1760,7 +2027,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             if not np.isnan(l_top) and not np.isnan(l_bot):
                                 y_mid = (l_top + l_bot) / 2.0
                                 # Use the same color as the TS plot
-                                color = TimeSeriesPlotWindow.COLORS[i % len(TimeSeriesPlotWindow.COLORS)]
+                                color = TIME_SERIES_COLORS[i % len(TIME_SERIES_COLORS)]
                                 cs_win.add_ts_sync_marker(x_mid, y_mid, color=color, marker_type=ts_win.marker_type)
 
     def remove_cross_section_by_id(self, item_id):
@@ -1923,11 +2190,28 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             else:
                 layer_indices = [0]
 
+        # Resolve extra-dimension selections. Always re-show the dialog for plot actions,
+        # but prefill it with the previous selection for convenience.
+        extra_dim_indices = self.get_extra_dim_indices_for_var(var_name, force_ask=True)
+        if extra_dim_indices is None:
+            return  # user cancelled
+
+        # Build a fetcher closure that can re-prompt on explicit variable changes, while
+        # reusing the current selection for time/layer refreshes of the same variable.
+        _parent = self
+        _handler = self.handler
+        def ts_data_fetcher(v, pt, lyrs, force_prompt=False):
+            edi = _parent.get_extra_dim_indices_for_var(v, force_ask=force_prompt)
+            if edi is None:
+                return {"error": "Selection cancelled."}
+            return _handler.get_timeseries_data(v, pt, lyrs, extra_dim_indices=edi)
+
         # Fetch initial data
         from qgis.PyQt.QtGui import QColor
         from qgis.gui import QgsVertexMarker
         try:
-            data = self.handler.get_timeseries_data(var_name, point, layer_indices)
+            data = _handler.get_timeseries_data(var_name, point, layer_indices,
+                                                 extra_dim_indices=extra_dim_indices)
             if not data or "error" in data:
                 QtWidgets.QMessageBox.warning(self, "Error", data.get("error", "No data found"))
                 return
@@ -1941,10 +2225,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             px, py = data['point']
             point = QgsPointXY(px, py)
 
+        TimeSeriesPlotWindow = self._import_time_series_plot_window()
+        if TimeSeriesPlotWindow is None:
+            return
+
         win = TimeSeriesPlotWindow(
             data, var_name, parent=self.iface.mainWindow(),
             item_id=item_id, all_vars=self.get_vars_with_time(),
-            data_fetcher=self.handler.get_timeseries_data,
+            data_fetcher=ts_data_fetcher,
             label=ts_label, point=point, layer_indices=layer_indices,
             marker_type=marker_type
         )
@@ -2197,7 +2485,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.active_ts_id = None
 
             self.var_list.clear()
-            self.info_text.clear()
             self.file_edit.clear()
             
             # 3. Close handler
@@ -2317,6 +2604,28 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.auto_update_time = dlg.chk_time.isChecked()
             self.auto_update_color = dlg.chk_color.isChecked()
             self.save_state_to_project()
+
+    def show_metadata_dialog(self):
+        if not self.handler:
+            QtWidgets.QMessageBox.information(self, "Metadata", "No dataset is currently loaded.")
+            return
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Dataset Metadata")
+        dlg.resize(700, 500)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+        info_text = QtWidgets.QTextBrowser(dlg)
+        info_text.setPlainText(self.handler.get_info_text())
+        layout.addWidget(info_text)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, QtCore.Qt.Horizontal, dlg)
+        close_btn = btns.button(QtWidgets.QDialogButtonBox.Close)
+        if close_btn is not None:
+            close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(btns)
+
+        dlg.exec_()
 
     def get_next_cs_label(self):
         """Finds the next label based on Max(existing_labels) + 1."""
