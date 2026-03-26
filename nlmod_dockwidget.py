@@ -3,7 +3,8 @@ from qgis.core import (
     QgsProject, QgsMeshLayer, QgsRasterLayer, QgsCoordinateReferenceSystem,
     QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsStyle, QgsRasterShader,
     QgsRasterBandStats, QgsMessageLog, Qgis, QgsGradientColorRamp,
-    QgsMeshRendererScalarSettings, QgsMeshDatasetIndex, QgsMeshRendererSettings
+    QgsMeshRendererScalarSettings, QgsMeshDatasetIndex, QgsMeshRendererSettings,
+    QgsRectangle
 )
 from .netcdf_handler import NetcdfHandler
 import os
@@ -307,10 +308,87 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self, "Select NetCDF File", "", "NetCDF Files (*.nc *.nc4 *.hdf5);;All Files (*)"
         )
         if filename:
-            self.file_edit.setText(filename)
-            self.open_netcdf(filename)
+            proceed, delete_maps, delete_cross_sections = self.confirm_open_new_file(filename)
+            if not proceed:
+                return
 
-    def open_netcdf(self, filepath):
+            if delete_maps:
+                self.delete_managed_map_layers()
+            if delete_cross_sections:
+                self.clear_cross_sections_only()
+
+            self.file_edit.setText(filename)
+            self.open_netcdf(filename, auto_select_top=True, auto_plot_default=True)
+
+    def has_managed_map_layers(self):
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.customProperty("nlmod_viewer_managed") or layer.customProperty("nlmod_inspector_managed"):
+                return True
+        return False
+
+    def delete_managed_map_layers(self):
+        to_remove = []
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.customProperty("nlmod_viewer_managed") or layer.customProperty("nlmod_inspector_managed"):
+                to_remove.append(layer.id())
+
+        for layer_id in to_remove:
+            QgsProject.instance().removeMapLayer(layer_id)
+
+        # The wrapped C++ layer object may already be destroyed here.
+        self.active_map_layer = None
+        self.active_var_name = None
+
+    def clear_cross_sections_only(self):
+        ids = list(self.plot_windows.keys())
+        for item_id in ids:
+            self.remove_cross_section_by_id(item_id)
+
+    def confirm_open_new_file(self, new_filepath):
+        current_path = self.file_edit.text().strip()
+        is_new_file = bool(current_path) and os.path.normcase(os.path.abspath(current_path)) != os.path.normcase(os.path.abspath(new_filepath))
+
+        has_maps = self.has_managed_map_layers()
+        has_cross_sections = len(self.plot_windows) > 0
+
+        if not is_new_file or (not has_maps and not has_cross_sections):
+            return True, False, False
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Open New NetCDF")
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        layout.addWidget(QtWidgets.QLabel("Existing content was found. Choose what to delete before opening the new file:"))
+
+        chk_maps = QtWidgets.QCheckBox("Delete existing map layers")
+        chk_cross_sections = QtWidgets.QCheckBox("Delete existing cross-sections")
+
+        chk_maps.setEnabled(has_maps)
+        chk_cross_sections.setEnabled(has_cross_sections)
+
+        if not has_maps:
+            chk_maps.setText("Delete existing map layers (none found)")
+        if not has_cross_sections:
+            chk_cross_sections.setText("Delete existing cross-sections (none found)")
+
+        layout.addWidget(chk_maps)
+        layout.addWidget(chk_cross_sections)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            QtCore.Qt.Horizontal,
+            dlg,
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return False, False, False
+
+        return True, bool(chk_maps.isChecked()), bool(chk_cross_sections.isChecked())
+
+    def open_netcdf(self, filepath, auto_select_top=False, auto_plot_default=False):
         if self.handler:
             self.handler.close()
         self._shown_structured_fallback_popup = False
@@ -350,6 +428,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.time_slider.blockSignals(False)
             
         self.populate_vars()
+
+        if auto_select_top and self.select_variable_by_name('top'):
+            selected_item = self.var_list.selectedItems()[0] if self.var_list.selectedItems() else None
+            has_spatial = bool(selected_item and selected_item.data(QtCore.Qt.UserRole + 3))
+            if auto_plot_default and has_spatial:
+                if not self.auto_update_var:
+                    self.add_layer(force_new=True)
+                self.zoom_to_model_extent(var_name='top')
         
         # Update existing cross-sections and time series with new data/variables
         vars_3d = self.get_vars_3d()
@@ -366,6 +452,55 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.ts_group.setVisible(len(self.time_values) > 0)
         
         self.save_state_to_project()
+
+    def find_variable_item_by_name(self, var_name):
+        for i in range(self.var_list.count()):
+            item = self.var_list.item(i)
+            if item.data(QtCore.Qt.UserRole) == var_name:
+                return item
+        return None
+
+    def select_variable_by_name(self, var_name):
+        item = self.find_variable_item_by_name(var_name)
+        if item is None:
+            return False
+        self.var_list.setCurrentItem(item)
+        return True
+
+    def select_first_layer_variable(self):
+        for i in range(self.var_list.count()):
+            item = self.var_list.item(i)
+            if item.data(QtCore.Qt.UserRole + 1):
+                self.var_list.setCurrentItem(item)
+                return item
+        return None
+
+    def zoom_to_model_extent(self, var_name=None):
+        if not self.iface or not self.handler:
+            return
+
+        rect = None
+        try:
+            extent = self.handler.get_extent(var_name)
+            if extent:
+                xmin, xmax, ymin, ymax = extent[:4]
+                rect = QgsRectangle(float(xmin), float(ymin), float(xmax), float(ymax))
+        except Exception:
+            rect = None
+
+        if rect is None:
+            try:
+                if self.active_map_layer:
+                    rect = self.active_map_layer.extent()
+            except Exception:
+                rect = None
+
+        if rect is None or rect.isEmpty():
+            return
+
+        canvas = self.iface.mapCanvas()
+        canvas.setExtent(rect)
+        canvas.refresh()
 
     def populate_vars(self):
         self.var_list.clear()
@@ -761,13 +896,15 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             
                             # Handle Ascending Y if necessary
                             y_is_ascending = extent[4]
-                            if y_is_ascending:
+                            if y_is_ascending and self.handler.angrot == 0:
                                 var_info = self.handler.ds.variables[var_name]
                                 y_size = var_info.shape[-2] if var_info.ndim >= 2 else 0
                                 if y_size > 0:
                                     vrt_xml = vrt_xml.replace('yOff="0"', f'yOff="{y_size}"')
                                     vrt_xml = vrt_xml.replace(f'ySize="{y_size}"', f'ySize="-{y_size}"')
                                     QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NLMOD Viewer", Qgis.Info)
+                            elif y_is_ascending and self.handler.angrot != 0:
+                                QgsMessageLog.logMessage("NLMOD: Skipped VRT Y-flip for rotated grid; geotransform handles row orientation.", "NLMOD Viewer", Qgis.Info)
                         else:
                             raise Exception("gdal.Translate failed")
                         ds = None
@@ -1110,8 +1247,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
         # Check if a variable is selected and has layer dimension
         if not selected_items:
-            QtWidgets.QMessageBox.information(self, "Info", "Please select a 3D variable first.")
-            return
+            item = self.select_first_layer_variable()
+            if item is None:
+                QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
+                return
+            selected_items = [item]
             
         var_name = selected_items[0].data(QtCore.Qt.UserRole)
         
@@ -1127,13 +1267,15 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     break
             
             if not has_layer_dim:
-                QtWidgets.QMessageBox.warning(
-                    self, 
-                    "Invalid Variable", 
-                    f"Variable '{var_name}' does not have a layer dimension.\n\n"
-                    "Cross-sections require 3D variables with layers (e.g., 'layer', 'z')."
-                )
-                return
+                item = self.select_first_layer_variable()
+                if item is None:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Info",
+                        "No variable with a layer dimension is available for cross-sections."
+                    )
+                    return
+                var_name = item.data(QtCore.Qt.UserRole)
         
         try:
             canvas = self.iface.mapCanvas()
@@ -1366,6 +1508,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
             win.vertex_distances = v_dists
             win.render_data(data, vertex_distances=v_dists)
+
+            if 'distances' in data and len(data['distances']) > 0:
+                dists = data['distances']
+                win.plot_widget.setXRange(float(dists.min()), float(dists.max()), padding=0)
             
             # 5. Update persistent rubber band and geometry
             self.cs_geometries[item_id] = points
@@ -2281,7 +2427,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             if filepath and os.path.exists(filepath):
                 self.file_edit.setText(filepath)
-                self.open_netcdf(filepath)
+                self.open_netcdf(filepath, auto_select_top=False, auto_plot_default=False)
                 
                 # Restore time selection
                 time_str, ok = QgsProject.instance().readEntry(scope, "global_time_idx", "0")

@@ -325,27 +325,114 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # Initialize Range Settings
         self.init_ranges(data, z_range=z_range, x_range=x_range)
 
-    def init_ranges(self, data, z_range=None, x_range=None):
-        # Calculate elevation extremes from top and botm
+    def _compute_safe_z_bounds(self, data):
+        """Compute robust plot bounds from top/botm while ignoring fill/extreme values."""
         all_z = []
-        if 'top' in data: all_z.append(data['top'])
-        if 'botm' in data: all_z.append(data['botm'])
-        
-        if all_z:
-            merged = np.concatenate([np.atleast_1d(z).flatten() for z in all_z])
-            valid_z = merged[~np.isnan(merged)]
-            if len(valid_z) > 0:
-                self.data_z_min = np.nanmin(valid_z)
-                self.data_z_max = np.nanmax(valid_z)
-                
-                # Add some padding
-                margin = (self.data_z_max - self.data_z_min) * 0.1
-                if margin == 0: margin = 1.0
-                
-                if z_range:
-                    self.plot_widget.setYRange(z_range[0], z_range[1], padding=0)
-                else:
-                    self.plot_widget.setYRange(self.data_z_min - margin, self.data_z_max + margin, padding=0)
+        if 'top' in data:
+            all_z.append(np.atleast_1d(data['top']).astype(float).ravel())
+        if 'botm' in data:
+            all_z.append(np.atleast_1d(data['botm']).astype(float).ravel())
+        if not all_z:
+            return None
+
+        merged = np.concatenate(all_z)
+        finite = merged[np.isfinite(merged)]
+        if finite.size == 0:
+            return None
+
+        # Ignore implausibly large magnitudes (common nodata/fill values)
+        finite = finite[np.abs(finite) < 1e20]
+        if finite.size == 0:
+            return None
+
+        z_min = float(np.nanmin(finite))
+        z_max = float(np.nanmax(finite))
+        if not np.isfinite(z_min) or not np.isfinite(z_max):
+            return None
+
+        if z_max <= z_min:
+            z_max = z_min + 1.0
+
+        span = z_max - z_min
+        margin = span * 0.1
+        if not np.isfinite(margin) or margin <= 0:
+            margin = 1.0
+
+        y_min = z_min - margin
+        y_max = z_max + margin
+
+        # Clamp to float32-safe range because pyqtgraph internally casts.
+        f32_lim = 3.0e37
+        y_min = float(np.clip(y_min, -f32_lim, f32_lim))
+        y_max = float(np.clip(y_max, -f32_lim, f32_lim))
+        if y_max <= y_min:
+            y_max = y_min + 1.0
+
+        return z_min, z_max, y_min, y_max
+
+    def _safe_set_y_range(self, y_min, y_max):
+        """Set y range with guards against invalid/extreme values."""
+        if not np.isfinite(y_min) or not np.isfinite(y_max):
+            self.plot_widget.setYRange(-1.0, 1.0, padding=0)
+            return
+
+        y_min = float(y_min)
+        y_max = float(y_max)
+        if y_max <= y_min:
+            y_max = y_min + 1.0
+
+        # Hard clamp for pyqtgraph float casting internals.
+        f32_lim = 3.0e37
+        y_min = float(np.clip(y_min, -f32_lim, f32_lim))
+        y_max = float(np.clip(y_max, -f32_lim, f32_lim))
+        if y_max <= y_min:
+            y_max = y_min + 1.0
+
+        self.plot_widget.setYRange(y_min, y_max, padding=0)
+
+    def _update_visible_z_bounds(self):
+        """Update z bounds based on currently selected layers and rendered geometry."""
+        if not hasattr(self, 'rendered_top') or not hasattr(self, 'rendered_botm'):
+            return
+
+        selected = self._sanitize_selected_layers(self.selected_layer_indices, self.data)
+        if not selected:
+            return
+
+        z_parts = []
+        for layer_idx in selected:
+            if layer_idx == 0:
+                z_parts.append(np.atleast_1d(self.rendered_top).astype(float).ravel())
+            else:
+                z_parts.append(np.atleast_1d(self.rendered_botm[layer_idx - 1]).astype(float).ravel())
+            z_parts.append(np.atleast_1d(self.rendered_botm[layer_idx]).astype(float).ravel())
+
+        merged = np.concatenate(z_parts)
+        finite = merged[np.isfinite(merged)]
+        finite = finite[np.abs(finite) < 1e20]
+        if finite.size == 0:
+            return
+
+        self.data_z_min = float(np.nanmin(finite))
+        self.data_z_max = float(np.nanmax(finite))
+        if self.data_z_max <= self.data_z_min:
+            self.data_z_max = self.data_z_min + 1.0
+
+    def init_ranges(self, data, z_range=None, x_range=None):
+        z_bounds = self._compute_safe_z_bounds(data)
+        if z_bounds is not None:
+            self.data_z_min, self.data_z_max, y_auto_min, y_auto_max = z_bounds
+            if z_range and len(z_range) == 2:
+                self._safe_set_y_range(z_range[0], z_range[1])
+            else:
+                self._safe_set_y_range(y_auto_min, y_auto_max)
+        else:
+            self.data_z_min = -1.0
+            self.data_z_max = 1.0
+            if z_range and len(z_range) == 2:
+                self._safe_set_y_range(z_range[0], z_range[1])
+            else:
+                self._safe_set_y_range(-1.0, 1.0)
         
         if x_range:
             self.plot_widget.setXRange(x_range[0], x_range[1], padding=0)
@@ -357,10 +444,14 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.range_changed.emit()
 
     def reset_elevation_range(self):
-        if hasattr(self, 'data_z_min'):
-            margin = (self.data_z_max - self.data_z_min) * 0.1
-            if margin == 0: margin = 1.0
-            self.plot_widget.setYRange(self.data_z_min - margin, self.data_z_max + margin, padding=0)
+        if hasattr(self, 'data_z_min') and hasattr(self, 'data_z_max'):
+            span = self.data_z_max - self.data_z_min
+            margin = span * 0.1
+            if not np.isfinite(margin) or margin <= 0:
+                margin = 1.0
+            self._safe_set_y_range(self.data_z_min - margin, self.data_z_max + margin)
+        else:
+            self._safe_set_y_range(-1.0, 1.0)
 
     def reset_ranges(self):
         self.reset_elevation_range()
@@ -415,6 +506,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             self.selected_layer_indices = self._sanitize_selected_layers(selected, self.data)
             self.info_label.setText("Click in plot to see cell info")
             self.render_data(self.data, self.v_min, self.v_max, vertex_distances=self.vertex_distances)
+            self.reset_elevation_range()
             if self.item_id:
                 self.layers_changed.emit(self.item_id, list(self.selected_layer_indices))
             self.settings_changed.emit()
@@ -865,6 +957,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         
         self.rendered_top = top
         self.rendered_botm = botm
+        self._update_visible_z_bounds()
         
         # Optimized Rendering using PColorMeshItem if available
         if PColorMeshItem is not None:
@@ -886,10 +979,14 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             # Handle Log Scale
             render_min, render_max = v_min, v_max
             if self.use_log:
-                # Map data to log space. 
-                # Use a small epsilon for values <= 0
+                # Map data to log space.
+                # Use a small epsilon for values <= 0.
+                # Preserve NaN (used to mark hidden/unselected layers) so the
+                # NaN-check below correctly routes to the fallback renderer.
                 epsilon = 1e-10
+                nan_mask = np.isnan(z_mesh)
                 z_mesh = np.log10(np.where(z_mesh > epsilon, z_mesh, epsilon))
+                z_mesh = np.where(nan_mask, np.nan, z_mesh)
                 render_min = np.log10(max(v_min, epsilon))
                 render_max = np.log10(max(v_max, epsilon))
             
@@ -1182,13 +1279,14 @@ class CrossSectionMeshItem(pg.GraphicsObject):
                     
                     # Properties from start of span
                     val = float(self.vals[i, j])
-                    if self.use_log:
+                    val_is_nan = np.isnan(val)
+                    if self.use_log and not val_is_nan:
                         epsilon = 1e-10
                         val = np.log10(max(val, epsilon))
                     z_t = l_top_all[j]
                     z_b = l_bot_all[j]
                     
-                    if not np.isnan(val) and not np.isnan(z_t) and not np.isnan(z_b):
+                    if not val_is_nan and not np.isnan(z_t) and not np.isnan(z_b):
                         # Bin index
                         norm = (val - min_val) / val_range
                         bin_idx = int(norm * (n_bins - 1))
@@ -1224,10 +1322,11 @@ class CrossSectionMeshItem(pg.GraphicsObject):
                 else:
                     # Fallback: simple interpolated rendering without indices
                     val = float(self.vals[i, j])
-                    if self.use_log:
+                    val_is_nan = np.isnan(val)
+                    if self.use_log and not val_is_nan:
                         epsilon = 1e-10
                         val = np.log10(max(val, epsilon))
-                    if not np.isnan(val):
+                    if not val_is_nan:
                         # Skip if geometry is NaN (Out of Domain)
                         z_t1, z_t2 = l_top_all[j], l_top_all[j+1]
                         z_b1, z_b2 = l_bot_all[j], l_bot_all[j+1]
