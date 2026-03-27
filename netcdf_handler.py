@@ -367,25 +367,16 @@ class NetcdfHandler:
             
         vars_with_time = []
         possible_times = {'time'}
-        spatial_dims_vertex = {'icell2d'}
-        spatial_dims_structured = {'x', 'y'}
         
         for name, var in self.ds.variables.items():
             # Skip coordinate variables themselves
-            if name.lower() in possible_times or name.lower() in spatial_dims_vertex or name.lower() in spatial_dims_structured:
+            if name.lower() in possible_times:
                 continue
                 
             dims_lower = [d.lower() for d in var.dimensions]
             has_time = any(d in possible_times for d in dims_lower)
-            
-            # Check spatial dimensions
-            has_spatial = False
-            if 'icell2d' in dims_lower:
-                has_spatial = True
-            elif 'x' in dims_lower and 'y' in dims_lower:
-                has_spatial = True
-            
-            if has_time and has_spatial:
+
+            if has_time:
                 vars_with_time.append(name)
                 
         return sorted(vars_with_time)
@@ -785,6 +776,24 @@ class NetcdfHandler:
     def _get_centroids(self):
         """Helper to get or calculate centroids for any grid type."""
         import numpy as np
+
+        def _looks_absolute_world(x_vals, y_vals):
+            """Heuristic: coordinates close to origin offsets are likely already world-space."""
+            try:
+                xv = np.asarray(x_vals, dtype=float).ravel()
+                yv = np.asarray(y_vals, dtype=float).ravel()
+                xv = xv[np.isfinite(xv)]
+                yv = yv[np.isfinite(yv)]
+                if xv.size == 0 or yv.size == 0:
+                    return False
+
+                mean_x = float(np.nanmean(xv))
+                mean_y = float(np.nanmean(yv))
+                close_x = np.abs(mean_x - self.xorigin) < np.abs(mean_x)
+                close_y = np.abs(mean_y - self.yorigin) < np.abs(mean_y)
+                return bool(close_x and close_y)
+            except Exception:
+                return False
         
         if 'centroids' in self._cache:
             return self._cache['centroids']
@@ -794,8 +803,10 @@ class NetcdfHandler:
             xc_vals = self.ds.variables['xc'][:]
             yc_vals = self.ds.variables['yc'][:]
             
-            # Apply transformation if necessary.
-            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not self.is_absolute:
+            # Apply transform only when centroids appear to be model-space coordinates.
+            # Some rotated datasets store xc/yc already in world coordinates.
+            is_world_coords = self.is_absolute or _looks_absolute_world(xc_vals, yc_vals)
+            if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not is_world_coords:
                 xc_trans, yc_trans = self.transform_model_to_world(xc_vals, yc_vals)
                 res = (xc_trans, yc_trans)
             else:
@@ -1314,16 +1325,24 @@ class NetcdfHandler:
             return None
 
         import numpy as np
-        if hasattr(world_pt, 'x'):
-            wx, wy = world_pt.x(), world_pt.y()
-        else:
-            wx, wy = world_pt
-            
-        mx, my = self.transform_world_to_model(wx, wy)
+        wx, wy = None, None
+        mx, my = None, None
+        if world_pt is not None:
+            if hasattr(world_pt, 'x'):
+                wx, wy = world_pt.x(), world_pt.y()
+            else:
+                wx, wy = world_pt
+            mx, my = self.transform_world_to_model(wx, wy)
+
+        var = self.ds.variables[var_name]
+        dims = var.dimensions
+
+        dims_lower = [d.lower() for d in dims]
+        has_spatial = ('icell2d' in dims_lower) or ('x' in dims_lower and 'y' in dims_lower)
         
-        # 1. Find the cell index
+        # 1. Find the cell index for spatial variables
         cell_idx = None
-        if self.grid_type == 'structured':
+        if has_spatial and self.grid_type == 'structured':
             x_vals = None
             y_vals = None
             vkeys = self.ds.variables.keys()
@@ -1346,7 +1365,7 @@ class NetcdfHandler:
                     # Snap to cell center in model space
                     mx_snapped, my_snapped = x_vals[c], y_vals[r]
                     wx, wy = self.transform_model_to_world(mx_snapped, my_snapped)
-        else:
+        elif has_spatial:
             # Vertex grid - use spatial index
             if 'strtree' not in self._cache:
                 # Force building the cache if it's missing (needed if cross-section hasn't been used yet)
@@ -1378,13 +1397,10 @@ class NetcdfHandler:
                     xc_all, yc_all = self._get_centroids()
                     wx, wy = xc_all[cell_idx], yc_all[cell_idx]
         
-        if cell_idx is None:
+        if has_spatial and cell_idx is None:
             return {"error": "No cell found at this location."}
 
         # 2. Extract time series
-        var = self.ds.variables[var_name]
-        dims = var.dimensions
-        
         if layer_indices is None:
             layer_indices = [0]
             
@@ -1420,39 +1436,100 @@ class NetcdfHandler:
             'layer_names': layer_names,
             'var_name': var_name,
             'unit': unit,
-            'point': (wx, wy),
+            'point': (wx, wy) if has_spatial and wx is not None and wy is not None else None,
             'has_layers': layer_dim_idx is not None,
             'cell_info': cell_idx
         }
         
         # If no layer dimension, we only need to fetch once
         target_indices = layer_indices if layer_dim_idx is not None else [0]
-        
-        for lyr in target_indices:
-            sl = [slice(None)] * var.ndim
-            if layer_dim_idx is not None:
-                if lyr >= len(layer_names): continue
-                sl[layer_dim_idx] = lyr
 
-            # Apply extra user-specified dimensions
-            if extra_dim_indices:
-                for i, d in enumerate(dims):
-                    if d in extra_dim_indices:
-                        sl[i] = int(extra_dim_indices[d])
-            
-            if self.grid_type == 'structured':
-                sl[-2] = cell_idx[0]
-                sl[-1] = cell_idx[1]
+        # Build extra-dimension combinations (single values or multi-select lists).
+        extra_dim_defs = {d['dim_name']: d for d in self.get_extra_dimensions(var_name)}
+
+        def _normalize_selection(sel, size):
+            if isinstance(sel, (list, tuple, set, np.ndarray)):
+                vals = [int(v) for v in sel]
             else:
-                sl[-1] = cell_idx
-            
-            data = var[tuple(sl)]
-            
-            # Handle masked arrays: fill with NaN
-            if hasattr(data, 'filled'):
-                data = data.filled(np.nan)
-            
-            results['values'][lyr] = data.tolist()
+                vals = [int(sel)]
+            vals = sorted(set(v for v in vals if 0 <= v < int(size)))
+            return vals or [0]
+
+        extra_dim_order = []
+        extra_dim_choices = []
+        if extra_dim_indices:
+            for d in dims:
+                if d in extra_dim_indices and d in self.ds.dimensions:
+                    size = self.ds.dimensions[d].size
+                    idxs = _normalize_selection(extra_dim_indices[d], size)
+                    extra_dim_order.append(d)
+                    extra_dim_choices.append(idxs)
+
+        combo_dicts = [{}]
+        if extra_dim_order:
+            import itertools
+            combo_dicts = [
+                {dim_name: int(ix) for dim_name, ix in zip(extra_dim_order, combo)}
+                for combo in itertools.product(*extra_dim_choices)
+            ]
+
+        series = []
+        for lyr in target_indices:
+            if layer_dim_idx is not None and lyr >= len(layer_names):
+                continue
+
+            for combo in combo_dicts:
+                sl = [slice(None)] * var.ndim
+                if layer_dim_idx is not None:
+                    sl[layer_dim_idx] = lyr
+
+                for i, d in enumerate(dims):
+                    if d in combo:
+                        sl[i] = combo[d]
+
+                if has_spatial:
+                    if self.grid_type == 'structured':
+                        sl[-2] = cell_idx[0]
+                        sl[-1] = cell_idx[1]
+                    else:
+                        sl[-1] = cell_idx
+
+                data = var[tuple(sl)]
+
+                # Handle masked arrays: fill with NaN
+                if hasattr(data, 'filled'):
+                    data = data.filled(np.nan)
+
+                values = data.tolist()
+
+                # Keep legacy structure for existing callers.
+                if lyr not in results['values']:
+                    results['values'][lyr] = values
+
+                base_name = var_name
+                if layer_dim_idx is not None and lyr < len(layer_names):
+                    base_name = layer_names[lyr]
+
+                if combo:
+                    labels = []
+                    for dim_name in extra_dim_order:
+                        ix = combo[dim_name]
+                        dim_def = extra_dim_defs.get(dim_name, {})
+                        dim_values = dim_def.get('values', [])
+                        lbl = dim_values[ix] if ix < len(dim_values) else str(ix)
+                        labels.append(f"{dim_name}={lbl}")
+                    series_name = f"{base_name} | {', '.join(labels)}"
+                else:
+                    series_name = base_name
+
+                series.append({
+                    'name': series_name,
+                    'layer_idx': int(lyr),
+                    'extra_selection': combo,
+                    'values': values,
+                })
+
+        results['series'] = series
             
         return results
 

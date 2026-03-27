@@ -64,6 +64,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         # Info
         self.info_label = QtWidgets.QLabel("")
         self.update_info_label()
+        self.update_marker_menu_state()
         left_layout.addWidget(self.info_label)
         
         # Plot
@@ -184,10 +185,22 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
                 self.render_plot()
                 self.variable_changed.emit(self.item_id, var_name)
                 self.update_info_label()
+                self.update_marker_menu_state()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch data: {e}")
 
+    def update_marker_menu_state(self):
+        """Enable marker settings only for spatial time-series that have a map point."""
+        has_spatial_point = bool(self.data and self.data.get('point') is not None)
+        self.btn_settings.setEnabled(has_spatial_point)
+        if has_spatial_point:
+            self.btn_settings.setToolTip("Settings")
+        else:
+            self.btn_settings.setToolTip("Map marker settings are unavailable for non-spatial time series")
+
     def show_settings_menu(self):
+        if not self.btn_settings.isEnabled():
+            return
         menu = QtWidgets.QMenu(self)
         
         # Marker Type Submenu
@@ -236,32 +249,42 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         colors = self.COLORS
 
         has_layers = self.data.get('has_layers', True)
+        series = self.data.get('series', [])
+        should_show_legend = bool(has_layers or len(series) > 1)
         
         # Reset or remove legend
         if hasattr(self, 'legend') and self.legend:
             self.plot_widget.getPlotItem().legend.items = []
-            if not has_layers:
+            if not should_show_legend:
                 # Completely remove legend if not needed
                 self.plot_widget.getPlotItem().removeItem(self.legend)
                 self.legend = None
-        elif has_layers:
+        elif should_show_legend:
             self.legend = self.plot_widget.addLegend()
-        
-        # If no layers, plot whatever is available in values (usually index 0)
-        plot_indices = self.layer_indices if has_layers else self.data.get('values', {}).keys()
-        
-        for i, lyr in enumerate(plot_indices):
-            if lyr in self.data.get('values', {}):
-                # Ensure we have a numerical float array and handle potential Infs
-                y = np.array(self.data['values'][lyr], dtype=float)
+
+        if series:
+            for i, s in enumerate(series):
+                y = np.array(s.get('values', []), dtype=float)
                 y[np.isinf(y)] = np.nan
-                
                 color = colors[i % len(colors)]
-                if has_layers:
-                    name = self.data['layer_names'][lyr] if 'layer_names' in self.data and lyr < len(self.data['layer_names']) else self.current_var
-                    self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), name=name, connect="finite")
+                if should_show_legend:
+                    self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), name=s.get('name', self.current_var), connect="finite")
                 else:
                     self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), connect="finite")
+        else:
+            # Legacy path: plot using layer-indexed values.
+            plot_indices = self.layer_indices if has_layers else self.data.get('values', {}).keys()
+            for i, lyr in enumerate(plot_indices):
+                if lyr in self.data.get('values', {}):
+                    y = np.array(self.data['values'][lyr], dtype=float)
+                    y[np.isinf(y)] = np.nan
+
+                    color = colors[i % len(colors)]
+                    if should_show_legend:
+                        name = self.data['layer_names'][lyr] if 'layer_names' in self.data and lyr < len(self.data['layer_names']) else self.current_var
+                        self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), name=name, connect="finite")
+                    else:
+                        self.plot_widget.plot(x, y, pen=pg.mkPen(color, width=2), connect="finite")
         
         # DateAxisItem handles ticks automatically
 

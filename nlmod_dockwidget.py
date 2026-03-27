@@ -132,29 +132,59 @@ class MainSettingsDialog(QtWidgets.QDialog):
 class ExtraDimensionDialog(QtWidgets.QDialog):
     """Dialog that lets the user choose an index for each extra (non-standard) dimension."""
 
-    def __init__(self, extra_dims, current_selections=None, parent=None):
+    def __init__(self, extra_dims, current_selections=None, parent=None, allow_multi=False):
         """
         extra_dims: list of {'dim_name': str, 'size': int, 'values': [str]}
-        current_selections: dict dim_name -> int (pre-fill combo boxes)
+        current_selections: dict dim_name -> int or [int, ...]
         """
         super().__init__(parent)
         self.setWindowTitle("Select Dimension Values")
         self.setModal(True)
+        self._allow_multi = bool(allow_multi)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(QtWidgets.QLabel(
-            "This variable has extra dimensions.\n"
-            "Please select the value to plot for each one:"))
+        if self._allow_multi:
+            layout.addWidget(QtWidgets.QLabel(
+                "This variable has extra dimensions.\n"
+                "Please select one or more values per dimension:"))
+        else:
+            layout.addWidget(QtWidgets.QLabel(
+                "This variable has extra dimensions.\n"
+                "Please select the value to plot for each one:"))
 
         self._combos = {}
         form = QtWidgets.QFormLayout()
         for dim_info in extra_dims:
             dim_name = dim_info['dim_name']
-            combo = QtWidgets.QComboBox()
-            combo.addItems(dim_info['values'])
-            pre = (current_selections or {}).get(dim_name, 0)
-            combo.setCurrentIndex(max(0, min(pre, len(dim_info['values']) - 1)))
-            form.addRow(dim_name + ':', combo)
-            self._combos[dim_name] = combo
+            dim_values = dim_info['values']
+            pre = (current_selections or {}).get(
+                dim_name,
+                list(range(len(dim_values))) if self._allow_multi else 0,
+            )
+
+            if self._allow_multi:
+                selector = QtWidgets.QListWidget()
+                # ExtendedSelection gives normal single-click behavior (replace selection),
+                # while still allowing Ctrl/Shift multi-select.
+                selector.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+                selector.setMaximumHeight(140)
+                selected_idxs = pre if isinstance(pre, (list, tuple)) else [int(pre)]
+                selected_idxs = [i for i in selected_idxs if 0 <= int(i) < len(dim_values)]
+                for i, value in enumerate(dim_values):
+                    list_item = QtWidgets.QListWidgetItem(value)
+                    selector.addItem(list_item)
+                    if i in selected_idxs:
+                        list_item.setSelected(True)
+                if selector.count() > 0 and not selector.selectedItems():
+                    for i in range(selector.count()):
+                        selector.item(i).setSelected(True)
+            else:
+                selector = QtWidgets.QComboBox()
+                selector.addItems(dim_values)
+                idx = int(pre[0]) if isinstance(pre, (list, tuple)) and pre else int(pre)
+                selector.setCurrentIndex(max(0, min(idx, len(dim_values) - 1)))
+
+            form.addRow(dim_name + ':', selector)
+            self._combos[dim_name] = selector
         layout.addLayout(form)
 
         btns = QtWidgets.QDialogButtonBox(
@@ -165,8 +195,17 @@ class ExtraDimensionDialog(QtWidgets.QDialog):
         layout.addWidget(btns)
 
     def get_selections(self):
-        """Returns {dim_name: int_index} for each extra dimension."""
-        return {dim_name: combo.currentIndex() for dim_name, combo in self._combos.items()}
+        """Returns {dim_name: int_index} or {dim_name: [int_index, ...]} based on mode."""
+        out = {}
+        for dim_name, selector in self._combos.items():
+            if self._allow_multi:
+                idxs = sorted(selector.row(item) for item in selector.selectedItems())
+                if not idxs and selector.count() > 0:
+                    idxs = list(range(selector.count()))
+                out[dim_name] = idxs
+            else:
+                out[dim_name] = selector.currentIndex()
+        return out
 
 
 class NlmodDockWidget(QtWidgets.QDockWidget):
@@ -218,7 +257,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.var_list = QtWidgets.QListWidget()
         self.var_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.var_list.itemSelectionChanged.connect(self.update_layer_selection)
-        self.var_list.itemDoubleClicked.connect(lambda: self.add_layer(force_new=True))
+        self.var_list.itemDoubleClicked.connect(self.on_variable_item_double_clicked)
         self.var_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.var_list.customContextMenuRequested.connect(self.handle_var_context_menu)
         layer_group_layout.addWidget(QtWidgets.QLabel("Variables:"))
@@ -347,6 +386,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.auto_update_color = True
         self._shown_structured_fallback_popup = False
         self._extra_dim_selections = {}  # var_name -> {dim_name: int_index}
+        self._extra_dim_multi_selections = {}  # var_name -> {dim_name: [int_index, ...]}
         
         self.is_restoring = True  # Start in restoring mode to prevent overwrites
         # Signal connection moved to end of restore_state_from_project
@@ -441,6 +481,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.handler.close()
         self._shown_structured_fallback_popup = False
         self._extra_dim_selections = {}
+        self._extra_dim_multi_selections = {}
         
         self.handler = NetcdfHandler(filepath)
         success, msg = self.handler.open()
@@ -491,12 +532,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         vars_3d = self.get_vars_3d()
         all_vars = self.get_all_vars()
         all_vars_with_time = self.get_vars_with_time()
+        non_spatial_vars_with_time = self.get_vars_with_time(has_spatial=False)
         times = dim_meta["times"]
         for win in self.plot_windows.values():
             win.refresh(vars_3d, head_vars=all_vars, time_values=times)
         
         for win in self.ts_windows.values():
-            win.refresh(all_vars=all_vars_with_time)
+            is_non_spatial_ts = bool(getattr(win, 'data', None) and win.data.get('point') is None)
+            win.refresh(all_vars=non_spatial_vars_with_time if is_non_spatial_ts else all_vars_with_time)
             
         # Hide Time Series group if no time dimension
         self.ts_group.setVisible(len(self.time_values) > 0)
@@ -794,9 +837,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         canvas.setExtent(rect)
         canvas.refresh()
 
-    def get_extra_dim_indices_for_var(self, var_name, force_ask=False):
+    def get_extra_dim_indices_for_var(self, var_name, force_ask=False, allow_multi=False):
         """
-        Returns a dict {dim_name: int_index} for any extra dimensions on *var_name*.
+        Returns selections for extra dimensions on *var_name*.
+        - allow_multi=False -> {dim_name: int_index}
+        - allow_multi=True  -> {dim_name: [int_index, ...]}
         Returns {} when the variable has no extra dims.
         Returns None when the user cancels the dialog.
         When force_ask=True, always re-shows the dialog even if a selection is cached,
@@ -807,15 +852,39 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         extra_dims = self.handler.get_extra_dimensions(var_name)
         if not extra_dims:
             return {}
-        current = self._extra_dim_selections.get(var_name)
+        cache = self._extra_dim_multi_selections if allow_multi else self._extra_dim_selections
+        current = cache.get(var_name)
         if current is not None and not force_ask:
             return current
-        dlg = ExtraDimensionDialog(extra_dims, current_selections=current, parent=self)
+        dlg = ExtraDimensionDialog(extra_dims, current_selections=current, parent=self, allow_multi=allow_multi)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return None  # user cancelled
         sel = dlg.get_selections()
-        self._extra_dim_selections[var_name] = sel
+        cache[var_name] = sel
         return sel
+
+    def on_variable_item_double_clicked(self, item):
+        """
+        Double-click behavior:
+        - time + no spatial: open time-series plot
+        - otherwise: keep legacy map plotting behavior
+        """
+        if not item or not self.handler:
+            return
+
+        has_time = bool(item.data(QtCore.Qt.UserRole + 2))
+        has_spatial = bool(item.data(QtCore.Qt.UserRole + 3))
+
+        if has_time and not has_spatial:
+            var_name = item.data(QtCore.Qt.UserRole)
+            win = self.add_time_series_plot(point=None, var_name=var_name)
+            if win:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+            return
+
+        self.add_layer(force_new=True)
 
     def populate_vars(self):
         self.var_list.clear()
@@ -871,10 +940,30 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             pass
         return vars_3d
 
-    def get_vars_with_time(self):
-        if self.handler:
+    def get_vars_with_time(self, has_spatial=None):
+        """
+        Returns variable names with a time dimension.
+        has_spatial:
+          - None: all time variables
+          - True: only time + spatial
+          - False: only time + non-spatial
+        """
+        if not self.handler:
+            return []
+
+        try:
+            vars_meta = self.handler.get_variables()
+            out = []
+            for v in vars_meta:
+                has_time = v.get('time_size', 0) > 0
+                if not has_time:
+                    continue
+                spatial_flag = bool(v.get('has_spatial', False))
+                if has_spatial is None or spatial_flag == bool(has_spatial):
+                    out.append(v['name'])
+            return sorted(out)
+        except Exception:
             return self.handler.get_vars_with_time()
-        return []
 
     def get_all_vars(self):
         """Helper to get all variable names."""
@@ -1097,16 +1186,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 # No existing layer, so no position to preserve
                 parent_group = None
                 insert_index = 0
-            
+
             # Always create a fresh layer for mesh
             layer = QgsMeshLayer(temp_path, display_name, "mdal")
             if layer.isValid():
                 layer.setCrs(qgs_crs)
                 
-                # Force group 0 active before styling
+                # Force group 0 active before styling; disable vector rendering (-1)
                 settings = layer.rendererSettings()
                 settings.setActiveScalarDatasetGroup(0)
-                settings.setActiveVectorDatasetGroup(0)
+                settings.setActiveVectorDatasetGroup(-1)
                 layer.setRendererSettings(settings)
                 
                 # Apply styling based on mode
@@ -1149,6 +1238,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 else:
                     # Add to root at the preserved index (or top if no previous position)
                     layer_tree_root.insertLayer(insert_index, layer)
+
+                # Re-assert active scalar group after tree insertion so QGIS shows
+                # mesh scalar legend entries/color range consistently.
+                try:
+                    refreshed = layer.rendererSettings()
+                    refreshed.setActiveScalarDatasetGroup(0)
+                    refreshed.setActiveVectorDatasetGroup(-1)
+                    layer.setRendererSettings(refreshed)
+                    layer.triggerRepaint()
+                except Exception:
+                    pass
                 
                 self.active_map_layer = layer
                 self.active_var_name = var_name
@@ -1459,10 +1559,17 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if min_val is None or max_val is None:
                 # Using dataProvider is often more robust for metadata in PyQGIS
                 provider = layer.dataProvider()
-                if provider:
-                    meta = provider.datasetGroupMetadata(idx)
-                else:
-                    meta = layer.datasetGroupMetadata(idx)
+                meta = None
+                if provider and hasattr(provider, 'datasetGroupMetadata'):
+                    try:
+                        meta = provider.datasetGroupMetadata(idx)
+                    except Exception:
+                        meta = None
+                if meta is None:
+                    try:
+                        meta = layer.datasetGroupMetadata(QgsMeshDatasetIndex(idx, 0))
+                    except Exception:
+                        meta = None
                 
                 # Robustly try to get min/max from metadata
                 min_val = None
@@ -1558,16 +1665,62 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
 
     def activate_mesh_dataset(self, layer, var_name):
-        """Sets the active scalar and vector dataset group by name."""
+        """Sets the active scalar/vector dataset group (and dataset index when possible) by variable name.
+        Returns the selected dataset group index, or -1 if none found.
+        """
         count = layer.datasetGroupCount()
+        chosen_idx = -1
         for i in range(count):
-            meta = layer.datasetGroupMetadata(i)
-            if meta.name() == var_name:
-                settings = layer.rendererSettings()
-                settings.setActiveScalarDatasetGroup(i)
-                settings.setActiveVectorDatasetGroup(i)
-                layer.setRendererSettings(settings)
+            meta = None
+            try:
+                meta = layer.datasetGroupMetadata(QgsMeshDatasetIndex(i, 0))
+            except Exception:
+                provider = layer.dataProvider() if hasattr(layer, 'dataProvider') else None
+                if provider and hasattr(provider, 'datasetGroupMetadata'):
+                    try:
+                        meta = provider.datasetGroupMetadata(i)
+                    except Exception:
+                        meta = None
+            name = meta.name() if meta and hasattr(meta, 'name') else ""
+            if name == var_name or (name and var_name in name):
+                chosen_idx = i
                 break
+
+        if chosen_idx < 0 and count > 0:
+            chosen_idx = 0
+
+        if chosen_idx < 0:
+            return -1
+
+        settings = layer.rendererSettings()
+        settings.setActiveScalarDatasetGroup(chosen_idx)
+        settings.setActiveVectorDatasetGroup(-1)
+
+        # Select a concrete dataset index to help QGIS build the scalar legend.
+        try:
+            time_i = 0
+            if self.time_slider and self.time_slider.isEnabled():
+                time_i = max(0, int(self.time_slider.value()))
+            provider = layer.dataProvider()
+            ds_count = 1
+            if provider and hasattr(provider, 'datasetCount'):
+                try:
+                    ds_count = provider.datasetCount(chosen_idx)
+                except Exception:
+                    try:
+                        ds_count = provider.datasetCount(QgsMeshDatasetIndex(chosen_idx, 0))
+                    except Exception:
+                        ds_count = 1
+            ds_i = min(time_i, max(0, int(ds_count) - 1))
+            if hasattr(settings, 'setActiveScalarDataset'):
+                settings.setActiveScalarDataset(QgsMeshDatasetIndex(chosen_idx, ds_i))
+            if hasattr(settings, 'setActiveVectorDataset'):
+                settings.setActiveVectorDataset(QgsMeshDatasetIndex(chosen_idx, ds_i))
+        except Exception:
+            pass
+
+        layer.setRendererSettings(settings)
+        return chosen_idx
 
 
     def get_or_create_xs_tool(self):
@@ -2053,14 +2206,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             item_id = selected[0].data(QtCore.Qt.UserRole)
             self.active_ts_id = item_id
             
-            if item_id in self.ts_points:
+            point = self.ts_points.get(item_id)
+            if point is not None:
                 # Automatically activate/initialize tool for dragging if not active
                 if self.iface.mapCanvas().mapTool() != getattr(self, 'ts_tool', None):
                     self.activate_point_tool(can_add=False)
                 
                 # Update the tool's marker position
                 if hasattr(self, 'ts_tool') and self.ts_tool:
-                    self.ts_tool.set_point(self.ts_points[item_id])
+                    self.ts_tool.set_point(point)
+                    self.ts_tool.can_add = False
+            else:
+                # Non-spatial TS: ensure no previous spatial marker remains draggable.
+                if hasattr(self, 'ts_tool') and self.ts_tool:
+                    self.ts_tool.set_point(None)
+                    self.ts_tool.can_add = False
                     
             # Reset CS highlight state (un-highlight all)
             for rb in self.cs_rubber_bands.values():
@@ -2297,7 +2457,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
         # Resolve extra-dimension selections. Always re-show the dialog for plot actions,
         # but prefill it with the previous selection for convenience.
-        extra_dim_indices = self.get_extra_dim_indices_for_var(var_name, force_ask=True)
+        extra_dim_indices = self.get_extra_dim_indices_for_var(var_name, force_ask=True, allow_multi=True)
         if extra_dim_indices is None:
             return  # user cancelled
 
@@ -2306,7 +2466,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         _parent = self
         _handler = self.handler
         def ts_data_fetcher(v, pt, lyrs, force_prompt=False):
-            edi = _parent.get_extra_dim_indices_for_var(v, force_ask=force_prompt)
+            edi = _parent.get_extra_dim_indices_for_var(v, force_ask=force_prompt, allow_multi=True)
             if edi is None:
                 return {"error": "Selection cancelled."}
             return _handler.get_timeseries_data(v, pt, lyrs, extra_dim_indices=edi)
@@ -2324,8 +2484,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             QtWidgets.QMessageBox.warning(self, "Error", f"Failed to fetch data: {e}")
             return
 
-        # Snapshot the snapped point if available
-        if 'point' in data:
+        # Snapshot the snapped point if available (for spatial variables)
+        if data.get('point') is not None:
             from qgis.core import QgsPointXY
             px, py = data['point']
             point = QgsPointXY(px, py)
@@ -2334,9 +2494,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if TimeSeriesPlotWindow is None:
             return
 
+        win_all_vars = self.get_vars_with_time(has_spatial=False) if data.get('point') is None else self.get_vars_with_time()
+
         win = TimeSeriesPlotWindow(
             data, var_name, parent=self.iface.mainWindow(),
-            item_id=item_id, all_vars=self.get_vars_with_time(),
+            item_id=item_id, all_vars=win_all_vars,
             data_fetcher=ts_data_fetcher,
             label=ts_label, point=point, layer_indices=layer_indices,
             marker_type=marker_type
@@ -2345,29 +2507,32 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.ts_windows[item_id] = win
         self.ts_points[item_id] = point
         
-        # Create persistent marker
-        marker = QgsVertexMarker(self.iface.mapCanvas())
-        marker.setCenter(point)
-        marker.setColor(QColor(0, 0, 255))
-        
-        if marker_type == 'cross':
-            marker.setIconType(QgsVertexMarker.ICON_CROSS)
-        elif marker_type == 'box':
-            marker.setIconType(QgsVertexMarker.ICON_BOX)
-        elif marker_type == 'circle':
-            marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
-        elif marker_type == 'triangle':
-             # QGIS 3.24+
-             if hasattr(QgsVertexMarker, 'ICON_TRIANGLE'):
-                 marker.setIconType(QgsVertexMarker.ICON_TRIANGLE)
-             else:
-                 marker.setIconType(QgsVertexMarker.ICON_BOX) # Fallback
-        else:
-            marker.setIconType(QgsVertexMarker.ICON_X)
+        # Create persistent marker for spatial time-series only.
+        if point is not None:
+            marker = QgsVertexMarker(self.iface.mapCanvas())
+            marker.setCenter(point)
+            marker.setColor(QColor(0, 0, 255))
+            
+            if marker_type == 'cross':
+                marker.setIconType(QgsVertexMarker.ICON_CROSS)
+            elif marker_type == 'box':
+                marker.setIconType(QgsVertexMarker.ICON_BOX)
+            elif marker_type == 'circle':
+                marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+            elif marker_type == 'triangle':
+                 # QGIS 3.24+
+                 if hasattr(QgsVertexMarker, 'ICON_TRIANGLE'):
+                     marker.setIconType(QgsVertexMarker.ICON_TRIANGLE)
+                 else:
+                     marker.setIconType(QgsVertexMarker.ICON_BOX) # Fallback
+            else:
+                marker.setIconType(QgsVertexMarker.ICON_X)
 
-        marker.setPenWidth(2)
-        marker.setIconSize(10)
-        self.ts_markers[item_id] = marker
+            marker.setPenWidth(2)
+            marker.setIconSize(11)
+            marker.show()
+            self.ts_markers[item_id] = marker
+            self.iface.mapCanvas().refresh()
         
         # Signals
         win.variable_changed.connect(lambda id, v: self.update_ts_list_item(id))
@@ -2387,7 +2552,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.ts_list.setCurrentItem(item)
         
         self.active_ts_id = item_id
-        if hasattr(self, 'ts_tool'):
+        if point is not None and hasattr(self, 'ts_tool'):
             self.ts_tool.set_point(point)
 
         self.save_state_to_project()
@@ -2477,18 +2642,21 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win.raise_()
             win.activateWindow() # Add focus
             self.active_ts_id = item_id
-            if hasattr(self, 'ts_tool'):
-                self.ts_tool.set_point(self.ts_points[item_id])
+            point = self.ts_points.get(item_id)
+            if point is not None and hasattr(self, 'ts_tool'):
+                self.ts_tool.set_point(point)
 
     def on_ts_list_context_menu(self, pos):
         item = self.ts_list.itemAt(pos)
         if not item: return
         
         item_id = item.data(QtCore.Qt.UserRole)
+        has_point = self.ts_points.get(item_id) is not None
         
         menu = QtWidgets.QMenu(self)
         rename_action = menu.addAction("Rename")
         edit_pos_action = menu.addAction("Edit Coordinates...")
+        edit_pos_action.setEnabled(has_point)
         
         menu.addSeparator()
         
@@ -2499,7 +2667,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         if action == rename_action:
             self.rename_time_series(item)
-        elif action == edit_pos_action:
+        elif action == edit_pos_action and has_point:
             self.edit_ts_point(item_id)
         elif action == move_up:
             self.move_ts_item(item, -1)
