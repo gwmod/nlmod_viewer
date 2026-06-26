@@ -1,6 +1,7 @@
 [general]
 name=NLMOD Viewer
 qgisMinimumVersion=3.0
+qgisMaximumVersion=4.99
 description=Inspect input and output of groundwater models built with nlmod (NetCDF).
 version=0.1
 author=Artesia

@@ -82,7 +82,7 @@ class NlmodViewer:
         """Ensures the dock widget is created and state is restored."""
         if not self.dockwidget:
             self.dockwidget = NlmodDockWidget(self.iface.mainWindow(), self.iface)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dockwidget)
+            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dockwidget)
             # restore_state_from_project is automatically called by DockWidget's __init__
             # but let's be explicit if we changed that to remove the timer
             self.dockwidget.restore_state_from_project()

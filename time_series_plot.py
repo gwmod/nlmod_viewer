@@ -25,8 +25,8 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         self.marker_type = marker_type
         
         self.setWindowTitle(f"Time Series {label}: {variable_name}")
-        self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
-        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
+        self.setAllowedAreas(QtCore.Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
         
         central = QtWidgets.QWidget()
         self.setWidget(central)
@@ -53,7 +53,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         tools_layout.addWidget(self.btn_toggle_layers)
 
         self.btn_settings = QtWidgets.QPushButton()
-        self.btn_settings.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        self.btn_settings.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
         self.btn_settings.setToolTip("Settings")
         self.btn_settings.clicked.connect(self.show_settings_menu)
         tools_layout.addWidget(self.btn_settings)
@@ -100,7 +100,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
         right_layout.addLayout(sel_btns_layout)
         
         self.layer_list = QtWidgets.QListWidget()
-        self.layer_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.layer_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
         self.layer_list.itemSelectionChanged.connect(self.on_layer_selection_changed)
         right_layout.addWidget(self.layer_list)
         
@@ -223,7 +223,7 @@ class TimeSeriesPlotWindow(QtWidgets.QDockWidget):
             group.addAction(action)
             action.triggered.connect(lambda _, v=value: self.set_marker_type(v))
             
-        menu.exec_(self.btn_settings.mapToGlobal(self.btn_settings.rect().bottomLeft()))
+        menu.exec(self.btn_settings.mapToGlobal(self.btn_settings.rect().bottomLeft()))
 
     def set_marker_type(self, value):
         self.marker_type = value

@@ -103,8 +103,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(scale_group)
         
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            QtCore.Qt.Horizontal, self)
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal, self)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -120,14 +120,14 @@ class LayerSelectionDialog(QtWidgets.QDialog):
         layout.addWidget(QtWidgets.QLabel("Select layers to plot for this cross-section:"))
 
         self.list_widget = QtWidgets.QListWidget()
-        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         layout.addWidget(self.list_widget)
 
         selected_set = set(selected_indices)
         for i, name in enumerate(layer_names):
             item = QtWidgets.QListWidgetItem(str(name))
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Checked if i in selected_set else QtCore.Qt.Unchecked)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.CheckState.Checked if i in selected_set else QtCore.Qt.CheckState.Unchecked)
             self.list_widget.addItem(item)
 
         quick_layout = QtWidgets.QHBoxLayout()
@@ -141,8 +141,8 @@ class LayerSelectionDialog(QtWidgets.QDialog):
         select_none_btn.clicked.connect(self.select_none)
 
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            QtCore.Qt.Horizontal,
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal,
             self,
         )
         btns.accepted.connect(self.accept)
@@ -151,16 +151,16 @@ class LayerSelectionDialog(QtWidgets.QDialog):
 
     def select_all(self):
         for i in range(self.list_widget.count()):
-            self.list_widget.item(i).setCheckState(QtCore.Qt.Checked)
+            self.list_widget.item(i).setCheckState(QtCore.Qt.CheckState.Checked)
 
     def select_none(self):
         for i in range(self.list_widget.count()):
-            self.list_widget.item(i).setCheckState(QtCore.Qt.Unchecked)
+            self.list_widget.item(i).setCheckState(QtCore.Qt.CheckState.Unchecked)
 
     def get_selected_indices(self):
         out = []
         for i in range(self.list_widget.count()):
-            if self.list_widget.item(i).checkState() == QtCore.Qt.Checked:
+            if self.list_widget.item(i).checkState() == QtCore.Qt.CheckState.Checked:
                 out.append(i)
         return out
 
@@ -201,7 +201,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         self.selected_layer_indices = self._sanitize_selected_layers(selected_layers, data)
         
         self.setWindowTitle(f"Cross Section {self.cs_label}: {variable_name}")
-        self.setAllowedAreas(QtCore.Qt.AllDockWidgetAreas)
+        self.setAllowedAreas(QtCore.Qt.DockWidgetArea.AllDockWidgetAreas)
         
         # Central Widget & Layout
         central = QtWidgets.QWidget()
@@ -263,11 +263,11 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         time_layout.setContentsMargins(0, 5, 0, 5)
         
         time_layout.addWidget(QtWidgets.QLabel("Time:"))
-        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(max(0, len(self.time_values) - 1))
         self.time_slider.setValue(self.current_time_idx)
-        self.time_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.time_slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
         self.time_slider.setTickInterval(1)
         self.time_slider.valueChanged.connect(self.change_time)
         time_layout.addWidget(self.time_slider)
@@ -497,7 +497,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             layer_names = [str(i + 1) for i in range(self.data.get('num_layers', 0))]
 
         dlg = LayerSelectionDialog(layer_names, self.selected_layer_indices, self)
-        if dlg.exec_():
+        if dlg.exec():
             selected = dlg.get_selected_indices()
             if not selected:
                 QtWidgets.QMessageBox.warning(self, "Invalid Selection", "Select at least one layer.")
@@ -523,7 +523,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                              show_layer_names=self.show_layer_names,
                              v_min=self.v_min, v_max=self.v_max, use_log=self.use_log,
                              cmap_name=self.cmap_name, invert_cmap=self.invert_cmap)
-        if dlg.exec_():
+        if dlg.exec():
             new_layer_boundaries = dlg.chk_boundaries.isChecked()
             new_cell_boundaries = dlg.chk_cell_boundaries.isChecked()
             new_layer_names = dlg.chk_layer_names.isChecked()
@@ -737,7 +737,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         super().leaveEvent(event)
 
     def on_plot_clicked(self, event):
-        if event.button() != QtCore.Qt.LeftButton:
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
             return
             
         pos = event.scenePos()
@@ -1021,7 +1021,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             else:
                 # Fallback to slower custom Item if PColorMeshItem fails (e.g. older versions or NaN coords)
                 from qgis.core import QgsMessageLog, Qgis
-                QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NLMOD Viewer", Qgis.Info)
+                QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 self.dataset_item = CrossSectionMeshItem(
                     dists, top, botm, vals_plot, cmap, (v_min, v_max), 
                     show_layer_boundaries=False, # Item handles its own
@@ -1123,7 +1123,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         # Add Vertical Vertex Lines (the A, B, C... points)
         if vertex_distances:
             for d in vertex_distances:
-                line = pg.InfiniteLine(pos=d, angle=90, pen=pg.mkPen('k', style=QtCore.Qt.DashLine))
+                line = pg.InfiniteLine(pos=d, angle=90, pen=pg.mkPen('k', style=QtCore.Qt.PenStyle.DashLine))
                 self.plot_widget.addItem(line)
                 self.vertex_lines.append(line)
 

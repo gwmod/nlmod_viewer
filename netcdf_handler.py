@@ -106,11 +106,11 @@ class NetcdfHandler:
         try:
             from qgis.core import QgsMessageLog, Qgis
             level_map = {
-                'info': Qgis.Info,
-                'warning': Qgis.Warning,
-                'critical': Qgis.Critical,
+                'info': Qgis.MessageLevel.Info,
+                'warning': Qgis.MessageLevel.Warning,
+                'critical': Qgis.MessageLevel.Critical,
             }
-            QgsMessageLog.logMessage(message, "NLMOD Viewer", level_map.get(level, Qgis.Info))
+            QgsMessageLog.logMessage(message, "NLMOD Viewer", level_map.get(level, Qgis.MessageLevel.Info))
         except Exception:
             pass
 
@@ -200,7 +200,7 @@ class NetcdfHandler:
                 QgsMessageLog.logMessage(
                     f"NLMOD: Transform detection -> is_absolute={self.is_absolute}, angrot={self.angrot}, xorigin={self.xorigin}, yorigin={self.yorigin}",
                     "NLMOD Viewer",
-                    Qgis.Info,
+                    Qgis.MessageLevel.Info,
                 )
             except Exception:
                 pass
@@ -650,7 +650,7 @@ class NetcdfHandler:
                         if x_cand is not None and y_cand is not None:
                             x_var = x_cand
                             y_var = y_cand
-                            QgsMessageLog.logMessage(f"NLMOD: Found coordinates via attribute: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.Info)
+                            QgsMessageLog.logMessage(f"NLMOD: Found coordinates via attribute: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.MessageLevel.Info)
 
             # Strategy 2: Search by standard_name (projection_x_coordinate)
             if x_var is None:
@@ -661,19 +661,19 @@ class NetcdfHandler:
                     if 'projection_y_coordinate' in std_name or 'latitude' in std_name:
                         y_var = v
                 if x_var is not None and y_var is not None:
-                    QgsMessageLog.logMessage(f"NLMOD: Found coordinates via standard_name: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.Info)
+                    QgsMessageLog.logMessage(f"NLMOD: Found coordinates via standard_name: {x_var.name}, {y_var.name}", "NLMOD Viewer", Qgis.MessageLevel.Info)
 
             # Strategy 3: Common names (fallback)
             if x_var is None:
                 vkeys = self.ds.variables.keys()
                 # Log keys for debug
-                QgsMessageLog.logMessage(f"NLMOD: Variable keys: {list(vkeys)}", "NLMOD Viewer", Qgis.Info)
+                QgsMessageLog.logMessage(f"NLMOD: Variable keys: {list(vkeys)}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 
                 for pair in [('x', 'y'), ('lon', 'lat'), ('longitude', 'latitude'), ('x_coord', 'y_coord'), ('X', 'Y')]:
                     if pair[0] in vkeys and pair[1] in vkeys:
                         x_var = self.ds.variables[pair[0]]
                         y_var = self.ds.variables[pair[1]]
-                        QgsMessageLog.logMessage(f"NLMOD: Found coordinates via name match: {pair}", "NLMOD Viewer", Qgis.Info)
+                        QgsMessageLog.logMessage(f"NLMOD: Found coordinates via name match: {pair}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                         break
 
             if x_var is None or y_var is None:
@@ -683,7 +683,7 @@ class NetcdfHandler:
                     if len(ext) == 4:
                          # For nlmod, if we only have extent, it's often South-to-North (Ascending)
                          # Previous Hardcoded 'False' was reported as flipped.
-                         QgsMessageLog.logMessage(f"NLMOD: Found extent via attribute (no coords): {ext}. Defaulting Ascending=True", "NLMOD Viewer", Qgis.Info)
+                         QgsMessageLog.logMessage(f"NLMOD: Found extent via attribute (no coords): {ext}. Defaulting Ascending=True", "NLMOD Viewer", Qgis.MessageLevel.Info)
                          return (ext[0], ext[1], ext[2], ext[3], True)
                 return None
             
@@ -692,12 +692,12 @@ class NetcdfHandler:
             y_vals_raw = y_var[:]
             x_vals, y_vals = self._normalize_structured_axes(x_vals_raw, y_vals_raw, context='get_extent')
             if x_vals is None or y_vals is None:
-                QgsMessageLog.logMessage("NLMOD: Could not normalize structured coordinate axes.", "NLMOD Viewer", Qgis.Warning)
+                QgsMessageLog.logMessage("NLMOD: Could not normalize structured coordinate axes.", "NLMOD Viewer", Qgis.MessageLevel.Warning)
                 return None
 
             if len(y_vals) >= 2:
                 y_is_ascending = (y_vals[1] > y_vals[0])
-                QgsMessageLog.logMessage(f"NLMOD: Detected Y direction: {y_vals[0]} to {y_vals[-1]} (Ascending={y_is_ascending})", "NLMOD Viewer", Qgis.Info)
+                QgsMessageLog.logMessage(f"NLMOD: Detected Y direction: {y_vals[0]} to {y_vals[-1]} (Ascending={y_is_ascending})", "NLMOD Viewer", Qgis.MessageLevel.Info)
             else:
                 y_is_ascending = False
 
@@ -705,7 +705,7 @@ class NetcdfHandler:
             if hasattr(self.ds, 'extent'):
                 ext = self.ds.extent
                 if len(ext) == 4:
-                     QgsMessageLog.logMessage(f"NLMOD: Using global extent for bounds, Ascending={y_is_ascending}", "NLMOD Viewer", Qgis.Info)
+                     QgsMessageLog.logMessage(f"NLMOD: Using global extent for bounds, Ascending={y_is_ascending}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                      return (ext[0], ext[1], ext[2], ext[3], y_is_ascending)
 
             # Otherwise calculate bounds from coords
@@ -713,7 +713,7 @@ class NetcdfHandler:
             y = y_vals
             
             if len(x) < 2 or len(y) < 2:
-                QgsMessageLog.logMessage("NLMOD: Coordinate arrays too short.", "NLMOD Viewer", Qgis.Warning)
+                QgsMessageLog.logMessage("NLMOD: Coordinate arrays too short.", "NLMOD Viewer", Qgis.MessageLevel.Warning)
                 return None
                 
             # Determine cell sizes (dx, dy)
@@ -745,7 +745,7 @@ class NetcdfHandler:
             return (min(xw_list), max(xw_list), min(yw_list), max(yw_list), y_is_ascending)
         except Exception as e:
             from qgis.core import QgsMessageLog, Qgis
-            QgsMessageLog.logMessage(f"NLMOD: Error calculating extent: {e}", "NLMOD Viewer", Qgis.Critical)
+            QgsMessageLog.logMessage(f"NLMOD: Error calculating extent: {e}", "NLMOD Viewer", Qgis.MessageLevel.Critical)
             return None
 
     def get_info_text(self):

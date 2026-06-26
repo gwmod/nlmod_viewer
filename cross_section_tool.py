@@ -12,10 +12,10 @@ class CrossSectionMapTool(QgsMapTool):
     def __init__(self, canvas):
         super().__init__(canvas)
         self.canvas = canvas
-        self.rubberBand = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+        self.rubberBand = QgsRubberBand(self.canvas, QgsWkbTypes.GeometryType.LineGeometry)
         self.rubberBand.setColor(QColor(255, 0, 0))
         self.rubberBand.setWidth(2)
-        self.rubberBand.setLineStyle(Qt.DashLine)
+        self.rubberBand.setLineStyle(Qt.PenStyle.DashLine)
         
         self.points = []
         self.markers = []
@@ -35,7 +35,7 @@ class CrossSectionMapTool(QgsMapTool):
 
     def refresh_display(self):
         """Update rubber band and markers from self.points."""
-        self.rubberBand.reset(QgsWkbTypes.LineGeometry)
+        self.rubberBand.reset(QgsWkbTypes.GeometryType.LineGeometry)
         for m in self.markers:
             self.canvas.scene().removeItem(m)
         self.markers = []
@@ -48,7 +48,7 @@ class CrossSectionMapTool(QgsMapTool):
             marker = QgsVertexMarker(self.canvas)
             marker.setCenter(p)
             marker.setColor(QColor(255, 0, 0))
-            marker.setIconType(QgsVertexMarker.ICON_BOX)
+            marker.setIconType(QgsVertexMarker.IconType.ICON_BOX)
             marker.setPenWidth(2)
             self.markers.append(marker)
         
@@ -58,7 +58,7 @@ class CrossSectionMapTool(QgsMapTool):
     def canvasPressEvent(self, e):
         point = self.toMapCoordinates(e.pos())
         
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             # Check if we are clicking on an existing vertex for dragging
             for i, p in enumerate(self.points):
                 if self.is_close(point, p):
@@ -90,7 +90,7 @@ class CrossSectionMapTool(QgsMapTool):
                 self.points.append(point)
                 self.refresh_display()
                 
-        elif e.button() == Qt.RightButton:
+        elif e.button() == Qt.MouseButton.RightButton:
             if self.is_drawing:
                 if len(self.points) >= 2:
                     # Finish drawing
@@ -137,7 +137,7 @@ class CrossSectionMapTool(QgsMapTool):
                     menu.addAction(action_add)
                 
                 if not menu.isEmpty():
-                    menu.exec_(e.globalPos())
+                    menu.exec(e.globalPos())
 
     def remove_vertex(self, idx):
         if len(self.points) > 2:
@@ -170,7 +170,7 @@ class CrossSectionMapTool(QgsMapTool):
             self.refresh_display()
         elif self.is_drawing and self.points:
             # Temporary "rubber band" to cursor
-            self.rubberBand.reset(QgsWkbTypes.LineGeometry)
+            self.rubberBand.reset(QgsWkbTypes.GeometryType.LineGeometry)
             for p in self.points:
                 self.rubberBand.addPoint(p, False)
             self.rubberBand.addPoint(point, True)
@@ -190,7 +190,7 @@ class CrossSectionMapTool(QgsMapTool):
         pass
 
     def deactivate(self):
-        self.rubberBand.reset(QgsWkbTypes.LineGeometry)
+        self.rubberBand.reset(QgsWkbTypes.GeometryType.LineGeometry)
         for m in self.markers:
             self.canvas.scene().removeItem(m)
         self.markers = []

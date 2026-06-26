@@ -32,20 +32,20 @@ class TimeSeriesMapTool(QgsMapTool):
             self.marker = QgsVertexMarker(self.canvas)
             self.marker.setCenter(self.point)
             self.marker.setColor(QColor(0, 0, 255))
-            self.marker.setIconType(QgsVertexMarker.ICON_X)
+            self.marker.setIconType(QgsVertexMarker.IconType.ICON_X)
             self.marker.setPenWidth(3)
             self.marker.setIconSize(12)
 
     def canvasPressEvent(self, e):
         point = self.toMapCoordinates(e.pos())
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             if self.point and self.is_close(point, self.point):
                 self.is_dragging = True
             elif self.can_add:
                 self.point = point
                 self.refresh_display()
                 self.point_clicked.emit(self.point)
-        elif e.button() == Qt.RightButton:
+        elif e.button() == Qt.MouseButton.RightButton:
             # Maybe cancel?
             pass
                 

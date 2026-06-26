@@ -34,7 +34,7 @@ class VertexEditorDialog(QtWidgets.QDialog):
         
         self.table = QtWidgets.QTableWidget(len(points), 2)
         self.table.setHorizontalHeaderLabels(["X (Easting)", "Y (Northing)"])
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         
         for i, p in enumerate(points):
             self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{p.x():.3f}"))
@@ -48,8 +48,8 @@ class VertexEditorDialog(QtWidgets.QDialog):
         layout.addWidget(note)
         
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            QtCore.Qt.Horizontal, self)
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal, self)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -82,7 +82,7 @@ class PointEditorDialog(QtWidgets.QDialog):
         layout.addRow(note)
         
         self.btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         self.btns.accepted.connect(self.accept)
         self.btns.rejected.connect(self.reject)
         layout.addRow(self.btns)
@@ -122,8 +122,8 @@ class MainSettingsDialog(QtWidgets.QDialog):
         layout.addWidget(group)
         
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            QtCore.Qt.Horizontal, self)
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal, self)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -165,7 +165,7 @@ class ExtraDimensionDialog(QtWidgets.QDialog):
                 selector = QtWidgets.QListWidget()
                 # ExtendedSelection gives normal single-click behavior (replace selection),
                 # while still allowing Ctrl/Shift multi-select.
-                selector.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+                selector.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
                 selector.setMaximumHeight(140)
                 selected_idxs = pre if isinstance(pre, (list, tuple)) else [int(pre)]
                 selected_idxs = [i for i in selected_idxs if 0 <= int(i) < len(dim_values)]
@@ -188,8 +188,8 @@ class ExtraDimensionDialog(QtWidgets.QDialog):
         layout.addLayout(form)
 
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            QtCore.Qt.Horizontal, self)
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal, self)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -213,7 +213,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         super(NlmodDockWidget, self).__init__(parent)
         self.iface = iface # Store iface reference
         self.setWindowTitle("NLMOD Viewer")
-        self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+        self.setAllowedAreas(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea | QtCore.Qt.DockWidgetArea.RightDockWidgetArea)
         
         # Main Widget & Layout
         self.main_widget = QtWidgets.QWidget()
@@ -255,10 +255,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Variable List
         self.var_list = QtWidgets.QListWidget()
-        self.var_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.var_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.var_list.itemSelectionChanged.connect(self.update_layer_selection)
         self.var_list.itemDoubleClicked.connect(self.on_variable_item_double_clicked)
-        self.var_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.var_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.var_list.customContextMenuRequested.connect(self.handle_var_context_menu)
         layer_group_layout.addWidget(QtWidgets.QLabel("Variables:"))
         layer_group_layout.addWidget(self.var_list)
@@ -280,9 +280,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.time_heading = QtWidgets.QLabel("Select Time:")
         time_sel_layout.addWidget(self.time_heading)
         
-        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.time_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.time_slider.setEnabled(False)
-        self.time_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.time_slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
         self.time_slider.setTickInterval(1)
         self.time_slider.valueChanged.connect(self.on_time_slider_changed)
         time_sel_layout.addWidget(self.time_slider)
@@ -320,8 +320,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         # Cross Section List Manager
         self.cs_list = QtWidgets.QListWidget()
-        self.cs_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.cs_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.cs_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.cs_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.cs_list.customContextMenuRequested.connect(self.on_cs_list_context_menu)
         self.cs_list.itemSelectionChanged.connect(self.on_cs_selection_changed)
         self.cs_list.itemSelectionChanged.connect(self.update_ui_state) # Track button enablement
@@ -348,8 +348,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         ts_layout.addLayout(ts_btn_layout)
         
         self.ts_list = QtWidgets.QListWidget()
-        self.ts_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.ts_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ts_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.ts_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.ts_list.customContextMenuRequested.connect(self.on_ts_list_context_menu)
         self.ts_list.itemSelectionChanged.connect(self.on_ts_selection_changed)
         self.ts_list.itemSelectionChanged.connect(self.update_ui_state)
@@ -463,15 +463,15 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         layout.addWidget(chk_cross_sections)
 
         btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            QtCore.Qt.Horizontal,
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            QtCore.Qt.Orientation.Horizontal,
             dlg,
         )
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         layout.addWidget(btns)
 
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return False, False, False
 
         return True, bool(chk_maps.isChecked()), bool(chk_cross_sections.isChecked())
@@ -522,7 +522,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
         if auto_select_top and self.select_variable_by_name('top'):
             selected_item = self.var_list.selectedItems()[0] if self.var_list.selectedItems() else None
-            has_spatial = bool(selected_item and selected_item.data(QtCore.Qt.UserRole + 3))
+            has_spatial = bool(selected_item and selected_item.data(QtCore.Qt.ItemDataRole.UserRole + 3))
             if auto_plot_default and has_spatial:
                 if not self.auto_update_var:
                     self.add_layer(force_new=True)
@@ -573,10 +573,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self,
             prompt_title,
             prompt_message,
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.Yes,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes,
         )
-        if answer != QtWidgets.QMessageBox.Yes:
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return False
 
         return self._install_package_in_qgis(package_name, import_name)
@@ -590,7 +590,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self,
         )
         progress.setWindowTitle("Installing Dependency")
-        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
         progress.setCancelButton(None)
         progress.setMinimumDuration(0)
         progress.show()
@@ -748,7 +748,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
     def _show_install_failure(self, package_name, details):
         msg_box = QtWidgets.QMessageBox(self)
-        msg_box.setIcon(QtWidgets.QMessageBox.Critical)
+        msg_box.setIcon(QtWidgets.QMessageBox.Icon.Critical)
         msg_box.setWindowTitle("Install Error")
         msg_box.setText(f"Automatic installation of '{package_name}' failed.")
         msg_box.setInformativeText(
@@ -756,7 +756,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         )
         if details:
             msg_box.setDetailedText(details)
-        msg_box.exec_()
+        msg_box.exec()
 
     def _import_cross_section_plot_window(self):
         try:
@@ -785,7 +785,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def find_variable_item_by_name(self, var_name):
         for i in range(self.var_list.count()):
             item = self.var_list.item(i)
-            if item.data(QtCore.Qt.UserRole) == var_name:
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == var_name:
                 return item
         return None
 
@@ -799,7 +799,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def get_first_layer_variable_item(self):
         for i in range(self.var_list.count()):
             item = self.var_list.item(i)
-            if item.data(QtCore.Qt.UserRole + 1):
+            if item.data(QtCore.Qt.ItemDataRole.UserRole + 1):
                 return item
         return None
 
@@ -857,7 +857,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if current is not None and not force_ask:
             return current
         dlg = ExtraDimensionDialog(extra_dims, current_selections=current, parent=self, allow_multi=allow_multi)
-        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return None  # user cancelled
         sel = dlg.get_selections()
         cache[var_name] = sel
@@ -872,11 +872,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not item or not self.handler:
             return
 
-        has_time = bool(item.data(QtCore.Qt.UserRole + 2))
-        has_spatial = bool(item.data(QtCore.Qt.UserRole + 3))
+        has_time = bool(item.data(QtCore.Qt.ItemDataRole.UserRole + 2))
+        has_spatial = bool(item.data(QtCore.Qt.ItemDataRole.UserRole + 3))
 
         if has_time and not has_spatial:
-            var_name = item.data(QtCore.Qt.UserRole)
+            var_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
             win = self.add_time_series_plot(point=None, var_name=var_name)
             if win:
                 win.show()
@@ -895,12 +895,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             text = f"{v['name']} [{dims_str}]"
             item = QtWidgets.QListWidgetItem(text)
             item.setToolTip(v['description'])
-            item.setData(QtCore.Qt.UserRole, v['name'])
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, v['name'])
             
             # Dimension Presence Flags
-            item.setData(QtCore.Qt.UserRole + 1, v.get('layer_size', 0) > 0)
-            item.setData(QtCore.Qt.UserRole + 2, v.get('time_size', 0) > 0)
-            item.setData(QtCore.Qt.UserRole + 3, v.get('has_spatial', False))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, v.get('layer_size', 0) > 0)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 2, v.get('time_size', 0) > 0)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 3, v.get('has_spatial', False))
             
             self.var_list.addItem(item)
     
@@ -914,9 +914,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return
             
         item = selected_items[0]
-        has_layers = item.data(QtCore.Qt.UserRole + 1)
-        has_times = item.data(QtCore.Qt.UserRole + 2)
-        has_spatial = item.data(QtCore.Qt.UserRole + 3)
+        has_layers = item.data(QtCore.Qt.ItemDataRole.UserRole + 1)
+        has_times = item.data(QtCore.Qt.ItemDataRole.UserRole + 2)
+        has_spatial = item.data(QtCore.Qt.ItemDataRole.UserRole + 3)
         
         self.layer_combo.setEnabled(has_layers)
         self.time_slider.setEnabled(has_times)
@@ -979,12 +979,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not item:
             return
             
-        var_name = item.data(QtCore.Qt.UserRole)
+        var_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
         menu = QtWidgets.QMenu(self.var_list)
         
         info_action = menu.addAction("Show Attributes")
         
-        action = menu.exec_(self.var_list.mapToGlobal(point))
+        action = menu.exec(self.var_list.mapToGlobal(point))
         
         if action == info_action:
             self.show_variable_info(var_name)
@@ -1026,7 +1026,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     QtWidgets.QMessageBox.information(self, "Info", "Please select a variable first.")
                 return
                 
-            var_name = selected_items[0].data(QtCore.Qt.UserRole)
+            var_name = selected_items[0].data(QtCore.Qt.ItemDataRole.UserRole)
             layer_idx = self.layer_combo.currentIndex() if self.layer_combo.isEnabled() else 0
             time_idx = self.time_slider.value() if self.time_slider.isEnabled() else 0
 
@@ -1257,7 +1257,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
 
         elif grid_type == "structured":
-            QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NLMOD Viewer", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Loading structured layer for {var_name}", "NLMOD Viewer", Qgis.MessageLevel.Info)
             
             # Try loading as Raster (NetCDF)
             safe_path = filepath.replace('\\', '/')
@@ -1306,7 +1306,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
             # band_idx: (time_idx * extra_stride * n_layers) + (extra_flat * n_layers) + layer_idx + 1
             band_idx = (time_idx * extra_stride * n_layers) + (extra_flat * n_layers) + layer_idx + 1
-            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}, extra={extra_dim_indices}] -> band={band_idx}", "NLMOD Viewer", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Structured layer for {var_name}: indices [layer={layer_idx}/{n_layers}, time={time_idx}, extra={extra_dim_indices}] -> band={band_idx}", "NLMOD Viewer", Qgis.MessageLevel.Info)
             
             safe_path = filepath.replace('\\', '/')
             # (Note: display_name is already calculated above)
@@ -1362,9 +1362,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                                 if y_size > 0:
                                     vrt_xml = vrt_xml.replace('yOff="0"', f'yOff="{y_size}"')
                                     vrt_xml = vrt_xml.replace(f'ySize="{y_size}"', f'ySize="-{y_size}"')
-                                    QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NLMOD Viewer", Qgis.Info)
+                                    QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NLMOD Viewer", Qgis.MessageLevel.Info)
                             elif y_is_ascending and self.handler.angrot != 0:
-                                QgsMessageLog.logMessage("NLMOD: Skipped VRT Y-flip for rotated grid; geotransform handles row orientation.", "NLMOD Viewer", Qgis.Info)
+                                QgsMessageLog.logMessage("NLMOD: Skipped VRT Y-flip for rotated grid; geotransform handles row orientation.", "NLMOD Viewer", Qgis.MessageLevel.Info)
                         else:
                             raise Exception("gdal.Translate failed")
                         ds = None
@@ -1381,23 +1381,23 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         with open(vrt_path, "w") as f:
                             f.write(vrt_xml)
                         uri = vrt_path
-                        QgsMessageLog.logMessage(f"NLMOD: Created VRT on disk at {uri}", "NLMOD Viewer", Qgis.Info)
+                        QgsMessageLog.logMessage(f"NLMOD: Created VRT on disk at {uri}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                     except Exception as e:
-                        QgsMessageLog.logMessage(f"NLMOD: Failed to write VRT to disk: {e}. Falling back to vsimem.", "NLMOD Viewer", Qgis.Warning)
+                        QgsMessageLog.logMessage(f"NLMOD: Failed to write VRT to disk: {e}. Falling back to vsimem.", "NLMOD Viewer", Qgis.MessageLevel.Warning)
                         vrt_mem_path = f"/vsimem/nlmod_raster_{id(self)}_{ts}.vrt"
                         gdal.FileFromMemBuffer(vrt_mem_path, vrt_xml)
                         uri = vrt_mem_path
             except Exception as e:
-                QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NLMOD Viewer", Qgis.Warning)
+                QgsMessageLog.logMessage(f"NLMOD: VRT creation failed: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
             # Capture existing style if we want to preserve it
             preserved_raster_renderer = None
             if existing_layer and not self.auto_update_color:
                 try:
                     preserved_raster_renderer = existing_layer.renderer().clone()
-                    QgsMessageLog.logMessage("NLMOD: Preserving raster renderer", "NLMOD Viewer", Qgis.Info)
+                    QgsMessageLog.logMessage("NLMOD: Preserving raster renderer", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 except Exception as e:
-                    QgsMessageLog.logMessage(f"NLMOD: Failed to capture style: {e}", "NLMOD Viewer", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to capture style: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
             # Calculate actual min/max for the current selection
             stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx, extra_dim_indices=extra_dim_indices)
@@ -1413,7 +1413,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     self.apply_raster_style(existing_layer, band_idx=1, min_val=v_min, max_val=v_max)
                 elif preserved_raster_renderer:
                     existing_layer.setRenderer(preserved_raster_renderer)
-                    QgsMessageLog.logMessage("NLMOD: Restored preserved raster style", "NLMOD Viewer", Qgis.Info)
+                    QgsMessageLog.logMessage("NLMOD: Restored preserved raster style", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 
                 # Re-apply CRS to prevent "invalid projection" warning after setDataSource
                 if not existing_layer.crs().isValid() or existing_layer.crs() != qgs_crs:
@@ -1490,7 +1490,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 # If values weren't passed, try to get them from the provider
                 if min_val is None or max_val is None:
                     # Statistics
-                    stats = layer.dataProvider().bandStatistics(band_idx, QgsRasterBandStats.Min | QgsRasterBandStats.Max, layer.extent(), 0)
+                    stats = layer.dataProvider().bandStatistics(band_idx, QgsRasterBandStats.Stats.Min | QgsRasterBandStats.Stats.Max, layer.extent(), 0)
                     min_val, max_val = stats.minimumValue, stats.maximumValue
                 
                 # Robustly handle NaN/Inf and Constant values
@@ -1504,7 +1504,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     max_val = max_val + 1.0
 
                 fcn = QgsColorRampShader(min_val, max_val)
-                fcn.setColorRampType(QgsColorRampShader.Interpolated)
+                fcn.setColorRampType(QgsColorRampShader.Type.Interpolated)
                 fcn.setSourceColorRamp(ramp)
                 
                 # Manual item generation ensures we use our sanitized min/max 
@@ -1527,7 +1527,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if self.iface:
                     self.iface.mapCanvas().refresh()
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Raster styling failed: {e}", "NLMOD Viewer", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Raster styling failed: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
     def style_mesh_layer(self, layer, min_val=None, max_val=None, idx=None):
         """Applies the Turbo colormap to a mesh layer's active scalar dataset."""
@@ -1603,7 +1603,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
             # 4. Create Shader
             shader = QgsColorRampShader(min_val, max_val)
-            shader.setColorRampType(QgsColorRampShader.Interpolated)
+            shader.setColorRampType(QgsColorRampShader.Type.Interpolated)
             shader.setSourceColorRamp(ramp)
             # MDAL doesn't have classifyColorRamp directly on shader in the same way 
             # as raster data provider, so we manually build items if needed 
@@ -1631,8 +1631,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # Set to interpolated (method name/existence varies)
             if hasattr(scalar_settings, 'setDataResamplingMethod'):
                 # Resampling methods: 0=None, 1=Neighbor, 2=Linear
-                # Setting to 0 (None) by default as requested.
-                scalar_settings.setDataResamplingMethod(0)
+                # Setting to None/NoResampling by default.
+                resampling_method = getattr(QgsMeshRendererScalarSettings, 'NoResampling', None)
+                if resampling_method is None:
+                    resampling_method = getattr(QgsMeshRendererScalarSettings, 'None_', 0)
+                scalar_settings.setDataResamplingMethod(resampling_method)
             
             settings.setScalarSettings(idx, scalar_settings)
             
@@ -1643,7 +1646,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 m_set.setEnabled(True)
                 m_set.setLineWidth(0.1)
                 if hasattr(Qgis, 'RenderMillimeters'):
-                    m_set.setLineWidthUnit(Qgis.RenderMillimeters)
+                    m_set.setLineWidthUnit(Qgis.RenderUnit.RenderMillimeters)
                 settings.setNativeMeshSettings(m_set)
             
             if hasattr(settings, 'edgeSettings'):
@@ -1661,7 +1664,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.iface.mapCanvas().refresh()
 
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Mesh styling failed: {e}", "NLMOD Viewer", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Mesh styling failed: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
 
     def activate_mesh_dataset(self, layer, var_name):
@@ -1750,7 +1753,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
                 return
         
-        var_name = item.data(QtCore.Qt.UserRole)
+        var_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         # Final validation check
         if self.handler and self.handler.ds:
@@ -1772,7 +1775,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         "No variable with a layer dimension is available for cross-sections."
                     )
                     return
-                var_name = item.data(QtCore.Qt.UserRole)
+                var_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         try:
             canvas = self.iface.mapCanvas()
@@ -1914,7 +1917,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             display_label = f"{cs_label}: {var_name}"
             
             item = QtWidgets.QListWidgetItem(display_label)
-            item.setData(QtCore.Qt.UserRole, item_id)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, item_id)
             self.cs_list.addItem(item)
             
             # Select it
@@ -1926,7 +1929,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.active_cs_id = item_id
             
             # Dock it in QGIS
-            self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, win)
+            self.iface.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, win)
             if visible:
                 win.show()
             else:
@@ -1937,10 +1940,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             from qgis.core import QgsWkbTypes
             from qgis.PyQt.QtGui import QColor
             
-            rubber_band = QgsRubberBand(self.iface.mapCanvas(), QgsWkbTypes.LineGeometry)
+            rubber_band = QgsRubberBand(self.iface.mapCanvas(), QgsWkbTypes.GeometryType.LineGeometry)
             rubber_band.setColor(QColor(255, 0, 0, 180)) 
             rubber_band.setWidth(3)
-            rubber_band.setLineStyle(QtCore.Qt.DashLine)
+            rubber_band.setLineStyle(QtCore.Qt.PenStyle.DashLine)
             
             for point in points:
                 rubber_band.addPoint(point)
@@ -1968,7 +1971,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
                 return
 
-        var_name = item.data(QtCore.Qt.UserRole)
+        var_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
 
         if self.handler and self.handler.ds and var_name in self.handler.ds.variables:
             possible_layer_dims = {'layer', 'z'}
@@ -1977,7 +1980,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if item is None:
                     QtWidgets.QMessageBox.information(self, "Info", "No variable with a layer dimension is available for cross-sections.")
                     return
-                var_name = item.data(QtCore.Qt.UserRole)
+                var_name = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         # Restore previous map tool
         if self.prev_map_tool:
@@ -2054,7 +2057,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
     def highlight_cross_section(self, item):
         from qgis.PyQt.QtGui import QColor
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         # Highlight rubber band on map
         # Hide all other rubber bands and show only the selected one
@@ -2091,10 +2094,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 
             tool.set_points(points)
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Failed to activate edit tool: {e}", "NLMOD Viewer", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Failed to activate edit tool: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
     def raise_cross_section_window(self, item):
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         # Show window
         if item_id in self.plot_windows:
@@ -2108,7 +2111,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         item = self.cs_list.itemAt(pos)
         if not item: return
         
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         menu = QtWidgets.QMenu(self)
         
@@ -2120,7 +2123,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         move_up = menu.addAction("Move Up")
         move_down = menu.addAction("Move Down")
         
-        action = menu.exec_(self.cs_list.mapToGlobal(pos))
+        action = menu.exec(self.cs_list.mapToGlobal(pos))
         
         if action == rename_action:
             self.rename_cross_section(item)
@@ -2141,13 +2144,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.save_state_to_project()
 
     def rename_cross_section(self, item):
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         win = self.plot_windows.get(item_id)
         if not win: return
         
         new_label, ok = QtWidgets.QInputDialog.getText(
             self, "Rename Cross-Section", "New Label:", 
-            QtWidgets.QLineEdit.Normal, win.cs_label)
+            QtWidgets.QLineEdit.EchoMode.Normal, win.cs_label)
             
         if ok and new_label:
             win.cs_label = new_label
@@ -2160,7 +2163,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not points: return
         
         dlg = VertexEditorDialog(points, self)
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             new_points = dlg.get_points()
             if len(new_points) >= 2:
                 # Set active and trigger update
@@ -2171,7 +2174,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         """Update the list widget text when a plot's variable changes."""
         for i in range(self.cs_list.count()):
             item = self.cs_list.item(i)
-            if item.data(QtCore.Qt.UserRole) == item_id:
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == item_id:
                 # Find the label (A, B, C...) from the window title or similar
                 # Or just reconstruct if we store it.
                 # The window itself has cs_label.
@@ -2203,7 +2206,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
             # Note: highlight_cross_section already handles clearing markers/tool if needed?
             # No, but we can do it here. 
-            item_id = selected[0].data(QtCore.Qt.UserRole)
+            item_id = selected[0].data(QtCore.Qt.ItemDataRole.UserRole)
             self.active_ts_id = item_id
             
             point = self.ts_points.get(item_id)
@@ -2323,7 +2326,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Also remove from list if it's still there (e.g. if closed via [X] on dock)
         for i in range(self.cs_list.count()):
             item = self.cs_list.item(i)
-            if item.data(QtCore.Qt.UserRole) == item_id:
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == item_id:
                 # Block signals to avoid recursive selection changes
                 self.cs_list.blockSignals(True)
                 self.cs_list.takeItem(i)
@@ -2343,7 +2346,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if not selected_items and self.handler and self.handler.ds:
                 found_idx = -1
                 for i in range(self.var_list.count()):
-                    v_name = self.var_list.item(i).data(QtCore.Qt.UserRole)
+                    v_name = self.var_list.item(i).data(QtCore.Qt.ItemDataRole.UserRole)
                     if v_name in self.handler.ds.variables:
                         v_dims = [d.lower() for d in self.handler.ds.variables[v_name].dimensions]
                         if 'time' in v_dims and ('icell2d' in v_dims or ('x' in v_dims and 'y' in v_dims)):
@@ -2357,7 +2360,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 QtWidgets.QMessageBox.information(self, "Info", "Please select a variable with time and spatial dimensions first.")
                 return
             
-            var_name = selected_items[0].data(QtCore.Qt.UserRole)
+            var_name = selected_items[0].data(QtCore.Qt.ItemDataRole.UserRole)
             if self.handler and self.handler.ds:
                 var = self.handler.ds.variables[var_name]
                 dims_lower = [d.lower() for d in var.dimensions]
@@ -2438,7 +2441,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         
         if not var_name:
             selected = self.var_list.selectedItems()
-            var_name = selected[0].data(QtCore.Qt.UserRole) if selected else self.get_vars_with_time()[0]
+            var_name = selected[0].data(QtCore.Qt.ItemDataRole.UserRole) if selected else self.get_vars_with_time()[0]
         
         if not item_id:
             import uuid
@@ -2514,19 +2517,19 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             marker.setColor(QColor(0, 0, 255))
             
             if marker_type == 'cross':
-                marker.setIconType(QgsVertexMarker.ICON_CROSS)
+                marker.setIconType(QgsVertexMarker.IconType.ICON_CROSS)
             elif marker_type == 'box':
-                marker.setIconType(QgsVertexMarker.ICON_BOX)
+                marker.setIconType(QgsVertexMarker.IconType.ICON_BOX)
             elif marker_type == 'circle':
-                marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+                marker.setIconType(QgsVertexMarker.IconType.ICON_CIRCLE)
             elif marker_type == 'triangle':
                  # QGIS 3.24+
                  if hasattr(QgsVertexMarker, 'ICON_TRIANGLE'):
-                     marker.setIconType(QgsVertexMarker.ICON_TRIANGLE)
+                     marker.setIconType(QgsVertexMarker.IconType.ICON_TRIANGLE)
                  else:
-                     marker.setIconType(QgsVertexMarker.ICON_BOX) # Fallback
+                     marker.setIconType(QgsVertexMarker.IconType.ICON_BOX) # Fallback
             else:
-                marker.setIconType(QgsVertexMarker.ICON_X)
+                marker.setIconType(QgsVertexMarker.IconType.ICON_X)
 
             marker.setPenWidth(2)
             marker.setIconSize(11)
@@ -2543,11 +2546,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Removing win.closed connection to remove_time_series_by_id 
         # so closing the pane doesn't remove it from the list.
         # Change visibility to Bottom pane as requested
-        self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, win)
+        self.iface.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, win)
         
         # Add to list
         item = QtWidgets.QListWidgetItem(f"{ts_label}: {var_name}")
-        item.setData(QtCore.Qt.UserRole, item_id)
+        item.setData(QtCore.Qt.ItemDataRole.UserRole, item_id)
         self.ts_list.addItem(item)
         self.ts_list.setCurrentItem(item)
         
@@ -2563,7 +2566,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             win = self.ts_windows[item_id]
             for i in range(self.ts_list.count()):
                 item = self.ts_list.item(i)
-                if item.data(QtCore.Qt.UserRole) == item_id:
+                if item.data(QtCore.Qt.ItemDataRole.UserRole) == item_id:
                     item.setText(f"{win.label}: {win.current_var}")
                     break
         self.save_state_to_project()
@@ -2577,18 +2580,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         marker = self.ts_markers[item_id]
         
         if marker_type == 'cross':
-            marker.setIconType(QgsVertexMarker.ICON_CROSS)
+            marker.setIconType(QgsVertexMarker.IconType.ICON_CROSS)
         elif marker_type == 'box':
-            marker.setIconType(QgsVertexMarker.ICON_BOX)
+            marker.setIconType(QgsVertexMarker.IconType.ICON_BOX)
         elif marker_type == 'circle':
-            marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+            marker.setIconType(QgsVertexMarker.IconType.ICON_CIRCLE)
         elif marker_type == 'triangle':
              if hasattr(QgsVertexMarker, 'ICON_TRIANGLE'):
-                 marker.setIconType(QgsVertexMarker.ICON_TRIANGLE)
+                 marker.setIconType(QgsVertexMarker.IconType.ICON_TRIANGLE)
              else:
-                 marker.setIconType(QgsVertexMarker.ICON_BOX)
+                 marker.setIconType(QgsVertexMarker.IconType.ICON_BOX)
         else:
-            marker.setIconType(QgsVertexMarker.ICON_X)
+            marker.setIconType(QgsVertexMarker.IconType.ICON_X)
             
         self.iface.mapCanvas().refresh()
         self.save_state_to_project()
@@ -2597,7 +2600,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
     def remove_time_series(self):
         selected = self.ts_list.selectedItems()
         if not selected: return
-        item_id = selected[0].data(QtCore.Qt.UserRole)
+        item_id = selected[0].data(QtCore.Qt.ItemDataRole.UserRole)
         self.remove_time_series_by_id(item_id)
 
     def remove_time_series_by_id(self, item_id):
@@ -2615,7 +2618,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             
         for i in range(self.ts_list.count()):
             item = self.ts_list.item(i)
-            if item.data(QtCore.Qt.UserRole) == item_id:
+            if item.data(QtCore.Qt.ItemDataRole.UserRole) == item_id:
                 self.ts_list.takeItem(i)
                 break
                 
@@ -2635,7 +2638,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if not selected: return
             item = selected[0]
             
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if item_id in self.ts_windows:
             win = self.ts_windows[item_id]
             win.show()
@@ -2650,7 +2653,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         item = self.ts_list.itemAt(pos)
         if not item: return
         
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         has_point = self.ts_points.get(item_id) is not None
         
         menu = QtWidgets.QMenu(self)
@@ -2663,7 +2666,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         move_up = menu.addAction("Move Up")
         move_down = menu.addAction("Move Down")
         
-        action = menu.exec_(self.ts_list.mapToGlobal(pos))
+        action = menu.exec(self.ts_list.mapToGlobal(pos))
         
         if action == rename_action:
             self.rename_time_series(item)
@@ -2685,13 +2688,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             self.save_state_to_project()
 
     def rename_time_series(self, item):
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         win = self.ts_windows.get(item_id)
         if not win: return
         
         new_label, ok = QtWidgets.QInputDialog.getText(
             self, "Rename Time Series", "New Label:", 
-            QtWidgets.QLineEdit.Normal, win.label)
+            QtWidgets.QLineEdit.EchoMode.Normal, win.label)
             
         if ok and new_label:
             win.label = new_label
@@ -2704,7 +2707,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not point: return
         
         dlg = PointEditorDialog(point, self)
-        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             new_point = dlg.get_point()
             if new_point:
                 self.active_ts_id = item_id
@@ -2780,7 +2783,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return
             
         item = selected_items[0]
-        item_id = item.data(QtCore.Qt.UserRole)
+        item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         self.remove_cross_section_by_id(item_id)
 
@@ -2835,7 +2838,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 # 5. Show/Move Marker
                 if not self.sync_marker:
                     self.sync_marker = QgsVertexMarker(self.iface.mapCanvas())
-                    self.sync_marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+                    self.sync_marker.setIconType(QgsVertexMarker.IconType.ICON_CIRCLE)
                     self.sync_marker.setPenWidth(3)
                     self.sync_marker.setIconSize(12)
                     self.sync_marker.setColor(QColor('yellow'))
@@ -2844,7 +2847,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.sync_marker.show()
                 
         except Exception as e:
-            QgsMessageLog.logMessage(f"NLMOD: Sync marker error: {e}", "NLMOD Viewer", Qgis.Warning)
+            QgsMessageLog.logMessage(f"NLMOD: Sync marker error: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
     def on_cs_cursor_left(self):
         if self.sync_marker:
@@ -2871,7 +2874,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                                  auto_var=self.auto_update_var,
                                  auto_layer=self.auto_update_layer,
                                  auto_time=self.auto_update_time)
-        if dlg.exec_():
+        if dlg.exec():
             self.auto_update_var = dlg.chk_var.isChecked()
             self.auto_update_layer = dlg.chk_layer.isChecked()
             self.auto_update_time = dlg.chk_time.isChecked()
@@ -2892,13 +2895,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         info_text.setPlainText(self.handler.get_info_text())
         layout.addWidget(info_text)
 
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, QtCore.Qt.Horizontal, dlg)
-        close_btn = btns.button(QtWidgets.QDialogButtonBox.Close)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, QtCore.Qt.Orientation.Horizontal, dlg)
+        close_btn = btns.button(QtWidgets.QDialogButtonBox.StandardButton.Close)
         if close_btn is not None:
             close_btn.clicked.connect(dlg.accept)
         layout.addWidget(btns)
 
-        dlg.exec_()
+        dlg.exec()
 
     def get_next_cs_label(self):
         """Finds the next label based on Max(existing_labels) + 1."""
@@ -3004,8 +3007,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     scope = "NlmodInspector"
             
             filepath, _ = QgsProject.instance().readEntry(scope, "filepath", "")
-            QgsMessageLog.logMessage(f"NLMOD: Restoring state from project scope: {scope}", "NLMOD Viewer", Qgis.Info)
-            QgsMessageLog.logMessage(f"NLMOD: Restoring filepath: {filepath}", "NLMOD Viewer", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Restoring state from project scope: {scope}", "NLMOD Viewer", Qgis.MessageLevel.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Restoring filepath: {filepath}", "NLMOD Viewer", Qgis.MessageLevel.Info)
             
             if filepath and os.path.exists(filepath):
                 self.file_edit.setText(filepath)
@@ -3032,7 +3035,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 self.auto_update_color = (v == "true")
                 
                 cs_json, _ = QgsProject.instance().readEntry(scope, "cross_sections", "[]")
-                QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NLMOD Viewer", Qgis.Info)
+                QgsMessageLog.logMessage(f"NLMOD: Restoring cross-sections: {cs_json}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 
                 try:
                     cs_list = json.loads(cs_json)
@@ -3060,7 +3063,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         if win and cs.get('head_variable'):
                             win.head_combo.setCurrentText(cs['head_variable'])
                 except Exception as e:
-                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NLMOD Viewer", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore cross-sections: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
                 
                 # Restore managed layers
                 self.restore_managed_layers()
@@ -3082,11 +3085,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         if win and not ts.get('visible', True):
                             win.hide()
                 except Exception as e:
-                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore time series: {e}", "NLMOD Viewer", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Failed to restore time series: {e}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
 
             else:
                 if filepath:
-                    QgsMessageLog.logMessage(f"NLMOD: Saved filepath does not exist: {filepath}", "NLMOD Viewer", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"NLMOD: Saved filepath does not exist: {filepath}", "NLMOD Viewer", Qgis.MessageLevel.Warning)
         finally:
             self.is_restoring = False
             # Now safe to connect visibility signal
@@ -3115,7 +3118,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     layers_to_refresh.append(layer)
         
         if layers_to_refresh:
-            QgsMessageLog.logMessage(f"NLMOD: Restoring {len(layers_to_refresh)} managed layers", "NLMOD Viewer", Qgis.Info)
+            QgsMessageLog.logMessage(f"NLMOD: Restoring {len(layers_to_refresh)} managed layers", "NLMOD Viewer", Qgis.MessageLevel.Info)
             
         for layer in layers_to_refresh:
             var_name = layer.customProperty("nlmod_viewer_var") or layer.customProperty("nlmod_inspector_var")
