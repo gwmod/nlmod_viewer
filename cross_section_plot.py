@@ -79,7 +79,7 @@ class SettingsDialog(QtWidgets.QDialog):
                     painter.end()
                     icon = QtGui.QIcon(pixmap)
                     self.cmap_combo.addItem(icon, name)
-                except Exception:
+                except (AttributeError, RuntimeError, TypeError):
                     self.cmap_combo.addItem(name)
         
         if cmap_name:
@@ -480,10 +480,10 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
         for idx in selected_layers:
             try:
                 i = int(idx)
-            except Exception:
-                continue
-            if 0 <= i < n_layers and i not in out:
-                out.append(i)
+                if 0 <= i < n_layers and i not in out:
+                    out.append(i)
+            except (ValueError, TypeError):
+                i = -1
         if not out:
             return list(range(n_layers))
         return sorted(out)
@@ -840,7 +840,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 colors.append([qcolor.red(), qcolor.green(), qcolor.blue(), qcolor.alpha()])
             
             return pg.ColorMap(stops, np.array(colors))
-        except Exception:
+        except (AttributeError, ValueError, TypeError):
             return pg.colormap.get('turbo')
 
     def render_data(self, data, v_min=None, v_max=None, vertex_distances=None):
@@ -891,7 +891,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                         self.head_data = res
                     else:
                         self.head_data = "Error"
-                except:
+                except (RuntimeError, ValueError, TypeError):
                     self.head_data = "Error"
         
         # Color Map
@@ -1161,7 +1161,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                             labels.append(f"{real_val:.2f}".rstrip('0').rstrip('.'))
                         else:
                             labels.append(f"{real_val:.2e}")
-                    except:
+                    except (ValueError, OverflowError):
                         labels.append("")
                 return labels
             axis.tickStrings = log_formatter

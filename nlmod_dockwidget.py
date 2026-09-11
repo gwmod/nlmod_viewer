@@ -91,7 +91,7 @@ class PointEditorDialog(QtWidgets.QDialog):
     def get_point(self):
         try:
             return QgsPointXY(float(self.x_edit.text()), float(self.y_edit.text()))
-        except:
+        except (ValueError, TypeError):
             return None
 
 class MainSettingsDialog(QtWidgets.QDialog):
@@ -545,7 +545,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         # Hide Time Series group if no time dimension
         self.ts_group.setVisible(len(self.time_values) > 0)
         
-        self.save_state_to_project()
+    def ensure_required_dependencies_on_startup(self):
+        """Check and prompt for required dependencies on startup."""
+        if not self._is_package_importable('netCDF4'):
+            self._prompt_install_netcdf4()
+        if not self._is_package_importable('pyqtgraph'):
+            self._prompt_install_pyqtgraph()
 
     def _prompt_install_netcdf4(self):
         return self._prompt_install_package(
@@ -606,6 +611,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             )
             return False
 
+        ALLOWED_PACKAGES = {"netCDF4", "pyqtgraph"}
+        if package_name not in ALLOWED_PACKAGES:
+            self._show_install_failure(package_name, "Unauthorized package installation requested.")
+            return False
+
         commands = [
             [python_executable, '-m', 'pip', 'install', '--user', package_name],
             [python_executable, '-m', 'pip', 'install', package_name],
@@ -619,6 +629,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     capture_output=True,
                     text=True,
                     check=False,
+                    shell=False,
                 )
                 install_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
                 if result.returncode == 0:
@@ -626,7 +637,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             else:
                 self._show_install_failure(package_name, install_output)
                 return False
-        except Exception as exc:
+        except (subprocess.SubprocessError, OSError) as exc:
             self._show_install_failure(package_name, str(exc))
             return False
         finally:
@@ -730,7 +741,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         return first_python
 
     def _probe_python_executable(self, candidate):
-        if not candidate or not os.path.isfile(candidate):
+        if not candidate or not isinstance(candidate, str) or not os.path.isfile(candidate):
             return (False, False)
 
         try:
@@ -739,9 +750,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 capture_output=True,
                 text=True,
                 check=False,
+                shell=False,
                 timeout=10,
             )
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             return (False, False)
 
         if check_python.returncode != 0:
@@ -753,10 +765,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 capture_output=True,
                 text=True,
                 check=False,
+                shell=False,
                 timeout=10,
             )
             return (True, check_pip.returncode == 0)
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             return (True, False)
 
     def _is_package_importable(self, import_name):
@@ -780,28 +793,28 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 path_candidates.append(user_site)
             elif isinstance(user_site, (list, tuple)):
                 path_candidates.extend(user_site)
-        except Exception:
-            pass
+        except (AttributeError, OSError):
+            user_site = None
 
         try:
             for sp in site.getsitepackages():
                 path_candidates.append(sp)
-        except Exception:
-            pass
+        except (AttributeError, OSError):
+            site_packages = []
 
         for p in path_candidates:
             try:
                 if p and os.path.isdir(p):
                     site.addsitedir(p)
-            except Exception:
-                pass
+            except (AttributeError, OSError):
+                p_valid = False
 
         # Remove failed/partial imports so a fresh import attempt is possible.
         if import_name in sys.modules:
             try:
                 del sys.modules[import_name]
-            except Exception:
-                pass
+            except KeyError:
+                sys.modules.pop(import_name, None)
 
         # netCDF4 can leave submodules in a partial state after a failed import.
         if import_name == 'netCDF4':
@@ -809,8 +822,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             for m in stale:
                 try:
                     del sys.modules[m]
-                except Exception:
-                    pass
+                except KeyError:
+                    sys.modules.pop(m, None)
 
         importlib.invalidate_caches()
 
@@ -888,14 +901,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if extent:
                 xmin, xmax, ymin, ymax = extent[:4]
                 rect = QgsRectangle(float(xmin), float(ymin), float(xmax), float(ymax))
-        except Exception:
+        except (AttributeError, ValueError, TypeError, RuntimeError):
             rect = None
 
         if rect is None:
             try:
                 if self.active_map_layer:
                     rect = self.active_map_layer.extent()
-            except Exception:
+            except (AttributeError, RuntimeError):
                 rect = None
 
         if rect is None or rect.isEmpty():
@@ -1004,8 +1017,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             for v in all_vars:
                 if any(d in possible_layer_dims for d in v.get('dimensions', [])):
                     vars_3d.append(v['name'])
-        except:
-            pass
+        except (AttributeError, KeyError, TypeError):
+            vars_3d = []
         return vars_3d
 
     def get_vars_with_time(self, has_spatial=None):
@@ -1039,7 +1052,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return []
         try:
             return [v['name'] for v in self.handler.get_variables()]
-        except:
+        except (AttributeError, KeyError, TypeError):
             return []
 
     def handle_var_context_menu(self, point):
@@ -1224,8 +1237,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     if hasattr(old_settings, 'edgeSettings'):
                         preserved_edges = old_settings.edgeSettings()
                         
-                except Exception as e:
-                    pass  # If capture fails, we'll just use default styling
+                except (AttributeError, KeyError, RuntimeError):
+                    preserved_mesh_style = None
+                    preserved_native_mesh = None
+                    preserved_edges = None
 
             # Calculate actual min/max for the current selection
             stats = self.handler.get_variable_stats(var_name, layer_idx, time_idx, extra_dim_indices=extra_dim_indices)
@@ -1315,8 +1330,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     refreshed.setActiveVectorDatasetGroup(-1)
                     layer.setRendererSettings(refreshed)
                     layer.triggerRepaint()
-                except Exception:
-                    pass
+                except (AttributeError, RuntimeError) as e:
+                    QgsMessageLog.logMessage(f"NLMOD: Repaint trigger skipped: {e}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 
                 self.active_map_layer = layer
                 self.active_var_name = var_name
@@ -1502,8 +1517,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                             gdal.Unlink(old_uri)
                         elif os.path.exists(old_uri):
                             os.remove(old_uri)
-                    except:
-                        pass
+                    except (OSError, ImportError) as e:
+                        QgsMessageLog.logMessage(f"NLMOD: Temp file cleanup skipped: {e}", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 
                 self.active_var_name = var_name
             else:
@@ -1650,8 +1665,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     try:
                         min_val = meta.statistic(0)
                         max_val = meta.statistic(1)
-                    except:
-                        pass
+                    except (AttributeError, RuntimeError, TypeError):
+                        min_val, max_val = None, None
                 elif hasattr(meta, 'minimum'):
                     min_val = meta.minimum()
                     max_val = meta.maximum()
@@ -1745,12 +1760,12 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             meta = None
             try:
                 meta = layer.datasetGroupMetadata(QgsMeshDatasetIndex(i, 0))
-            except Exception:
+            except (AttributeError, RuntimeError, TypeError):
                 provider = layer.dataProvider() if hasattr(layer, 'dataProvider') else None
                 if provider and hasattr(provider, 'datasetGroupMetadata'):
                     try:
                         meta = provider.datasetGroupMetadata(i)
-                    except Exception:
+                    except (AttributeError, RuntimeError, TypeError):
                         meta = None
             name = meta.name() if meta and hasattr(meta, 'name') else ""
             if name == var_name or (name and var_name in name):
@@ -1777,18 +1792,18 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if provider and hasattr(provider, 'datasetCount'):
                 try:
                     ds_count = provider.datasetCount(chosen_idx)
-                except Exception:
+                except (AttributeError, RuntimeError, TypeError):
                     try:
                         ds_count = provider.datasetCount(QgsMeshDatasetIndex(chosen_idx, 0))
-                    except Exception:
+                    except (AttributeError, RuntimeError, TypeError):
                         ds_count = 1
             ds_i = min(time_i, max(0, int(ds_count) - 1))
             if hasattr(settings, 'setActiveScalarDataset'):
                 settings.setActiveScalarDataset(QgsMeshDatasetIndex(chosen_idx, ds_i))
             if hasattr(settings, 'setActiveVectorDataset'):
                 settings.setActiveVectorDataset(QgsMeshDatasetIndex(chosen_idx, ds_i))
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, TypeError):
+            ds_i = 0
 
         layer.setRendererSettings(settings)
         return chosen_idx
@@ -1885,8 +1900,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if model_crs.isValid() and canvas_crs != model_crs:
                 xform = QgsCoordinateTransform(canvas_crs, model_crs, QgsProject.instance())
                 points = [xform.transform(p) for p in points]
-        except:
-            pass
+        except (AttributeError, RuntimeError, TypeError):
+            points = points
             
         return self.handler.get_cross_section_data(var_name, points, time_idx=time_idx,
                                 extra_dim_indices=extra_dim_indices)
@@ -1935,8 +1950,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if model_crs.isValid() and canvas_crs != model_crs:
                     xform = QgsCoordinateTransform(canvas_crs, model_crs, QgsProject.instance())
                     dist_points = [xform.transform(p) for p in points]
-            except:
-                pass
+            except (AttributeError, RuntimeError, TypeError):
+                dist_points = points
 
             v_dists = [0.0]
             curr_d = 0.0
@@ -2091,8 +2106,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 if model_crs.isValid() and canvas_crs != model_crs:
                     xform = QgsCoordinateTransform(canvas_crs, model_crs, QgsProject.instance())
                     dist_points = [xform.transform(p) for p in points]
-            except:
-                pass
+            except (AttributeError, RuntimeError, TypeError):
+                dist_points = points
 
             v_dists = [0.0]
             curr_d = 0.0
@@ -3089,8 +3104,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         time_idx = int(time_str)
                         if time_idx <= self.time_slider.maximum():
                             self.time_slider.setValue(time_idx)
-                    except:
-                        pass
+                    except (ValueError, TypeError):
+                        time_idx = 0
                 
                 # Restore auto-update settings
                 v, _ = QgsProject.instance().readEntry(scope, "auto_update_var", "false")
@@ -3163,8 +3178,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             # Now safe to connect visibility signal
             try:
                 self.visibilityChanged.disconnect(self.save_state_to_project)
-            except:
-                pass
+            except (TypeError, RuntimeError):
+                pass_signal_disconnect = True
             self.visibilityChanged.connect(self.save_state_to_project)
             # DO NOT call save_state_to_project() here
 

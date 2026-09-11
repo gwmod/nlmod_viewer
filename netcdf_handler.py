@@ -98,7 +98,7 @@ class NetcdfHandler:
             mean_y = float(np.nanmean(yv))
             close_to_yorigin = np.abs(mean_y - self.yorigin) < np.abs(mean_y)
             return bool(close_to_xorigin and close_to_yorigin)
-        except Exception:
+        except (TypeError, ValueError, AttributeError):
             return False
 
     def _log_qgis_message(self, message, level='info'):
@@ -111,8 +111,8 @@ class NetcdfHandler:
                 'critical': Qgis.MessageLevel.Critical,
             }
             QgsMessageLog.logMessage(message, "NLMOD Viewer", level_map.get(level, Qgis.MessageLevel.Info))
-        except Exception:
-            pass
+        except (ImportError, AttributeError):
+            print(f"NLMOD [{level.upper()}]: {message}")
 
     def _normalize_structured_axes(self, x_vals, y_vals, context='structured'):
         """Returns 1D x/y axes for affine approximations on structured grids."""
@@ -195,15 +195,10 @@ class NetcdfHandler:
                 self.is_absolute = self._detect_absolute_coords(x_test, y_test)
 
             # Helpful for diagnosing shifted/rotated render behavior per dataset.
-            try:
-                from qgis.core import QgsMessageLog, Qgis
-                QgsMessageLog.logMessage(
-                    f"NLMOD: Transform detection -> is_absolute={self.is_absolute}, angrot={self.angrot}, xorigin={self.xorigin}, yorigin={self.yorigin}",
-                    "NLMOD Viewer",
-                    Qgis.MessageLevel.Info,
-                )
-            except Exception:
-                pass
+            self._log_qgis_message(
+                f"NLMOD: Transform detection -> is_absolute={self.is_absolute}, angrot={self.angrot}, xorigin={self.xorigin}, yorigin={self.yorigin}",
+                'info',
+            )
             
             return True, ""
         except ImportError:
@@ -461,7 +456,7 @@ class NetcdfHandler:
                                     # Fallback for cftime
                                     d_dt = datetime(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
                                     return d_dt.timestamp()
-                                except:
+                                except (AttributeError, ValueError, TypeError):
                                     return 0.0
 
                             if isinstance(dates, (list, np.ndarray)):
@@ -473,7 +468,7 @@ class NetcdfHandler:
                         else:
                             times = [str(v) for v in vals]
                             time_stamps = [float(v) for v in vals]
-                    except:
+                    except (ValueError, TypeError, AttributeError):
                         times = [str(v) for v in vals]
                         time_stamps = [float(v) for v in vals]
                 if not times:
@@ -529,8 +524,8 @@ class NetcdfHandler:
                         vals = self.ds.variables[d][:]
                         try:
                             layer_values = [str(v) for v in vals]
-                        except:
-                            pass
+                        except (TypeError, ValueError, AttributeError):
+                            layer_values = []
                     if not layer_values:
                          size = self.ds.dimensions[d].size
                          layer_values = [str(i+1) for i in range(size)]
@@ -560,7 +555,7 @@ class NetcdfHandler:
                                     time_values = [fmt(dates)]
                             else:
                                 time_values = [str(v) for v in vals]
-                        except:
+                        except (ValueError, TypeError, AttributeError):
                             time_values = [str(v) for v in vals]
                     if not time_values:
                          size = self.ds.dimensions[d].size
@@ -792,7 +787,7 @@ class NetcdfHandler:
                 close_x = np.abs(mean_x - self.xorigin) < np.abs(mean_x)
                 close_y = np.abs(mean_y - self.yorigin) < np.abs(mean_y)
                 return bool(close_x and close_y)
-            except Exception:
+            except (TypeError, ValueError, AttributeError):
                 return False
         
         if 'centroids' in self._cache:
@@ -838,10 +833,11 @@ class NetcdfHandler:
                 v_idx = curr_v[curr_v != nodata]
                 if len(v_idx) >= 3:
                     try:
-                        xc[i] = np.mean(xv_world[v_idx])
-                        yc[i] = np.mean(yv_world[v_idx])
-                    except:
-                        pass
+                        xc[i] = float(np.mean(xv_world[v_idx]))
+                        yc[i] = float(np.mean(yv_world[v_idx]))
+                    except (IndexError, TypeError, ValueError):
+                        xc[i] = np.nan
+                        yc[i] = np.nan
             
             res = (xc, yc)
             self._cache['centroids'] = res
@@ -1572,5 +1568,5 @@ class NetcdfHandler:
             if math.isnan(v_max) or math.isinf(v_max): v_max = 1.0
             
             return {"min": v_min, "max": v_max}
-        except:
+        except (KeyError, IndexError, ValueError, TypeError):
             return {"min": 0.0, "max": 1.0}
