@@ -107,6 +107,24 @@ nlmod_viewer/
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Publish to QGIS Plugin Repository
+
+This repository includes a GitHub Actions workflow to publish the plugin to the QGIS plugin repository.
+
+Workflow file:
+- `.github/workflows/publish-qgis-plugin.yml`
+
+### Required GitHub repository secrets
+
+- `QGIS_PLUGIN_TOKEN`: plugin upload token created on plugins.qgis.org
+
+### How publishing is triggered
+
+- Manual: run the workflow from **Actions > Publish QGIS Plugin > Run workflow**
+- Automatic: when a GitHub release is published
+
+The workflow creates `nlmod_viewer.zip` containing the plugin folder and uploads it through the QGIS plugin API endpoint using a Bearer token.
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
