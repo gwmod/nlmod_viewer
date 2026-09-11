@@ -1,5 +1,5 @@
 from qgis.PyQt import QtWidgets, QtCore, QtGui
-from qgis.core import QgsStyle
+from qgis.core import QgsStyle, QgsMessageLog, Qgis, QgsPointXY
 import pyqtgraph as pg
 import numpy as np
 
@@ -811,7 +811,6 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
             )
             
             # Emit signal with world point
-            from qgis.core import QgsPointXY
             self.sigPointPicked.emit(QgsPointXY(cx, cy))
         else:
             self.info_label.setText("No cell at click location")
@@ -1019,8 +1018,7 @@ class CrossSectionPlotWindow(QtWidgets.QDockWidget):
                 self.dataset_item.setLevels((render_min, render_max))
                 self.plot_widget.addItem(self.dataset_item)
             else:
-                # Fallback to slower custom Item if PColorMeshItem fails (e.g. older versions or NaN coords)
-                from qgis.core import QgsMessageLog, Qgis
+                # Fallback to slower custom Item if PColorMeshItem fails (e.g. older versions or NaN coords
                 QgsMessageLog.logMessage(f"NLMOD: NaN values found in z_mesh, using custom renderer", "NLMOD Viewer", Qgis.MessageLevel.Info)
                 self.dataset_item = CrossSectionMeshItem(
                     dists, top, botm, vals_plot, cmap, (v_min, v_max), 

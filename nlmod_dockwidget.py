@@ -1,10 +1,12 @@
 from qgis.PyQt import QtWidgets, QtCore
+from qgis.PyQt.QtGui import QColor
+from qgis.gui import QgsRubberBand
 from qgis.core import (
     QgsProject, QgsMeshLayer, QgsRasterLayer, QgsCoordinateReferenceSystem,
     QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsStyle, QgsRasterShader,
     QgsRasterBandStats, QgsMessageLog, Qgis, QgsGradientColorRamp,
-    QgsMeshRendererScalarSettings, QgsMeshDatasetIndex, QgsMeshRendererSettings,
-    QgsRectangle
+    QgsMeshRendererScalarSettings, QgsMeshDatasetIndex,
+    QgsRectangle, QgsPointXY, QgsWkbTypes
 )
 from . import netcdf_handler as netcdf_handler_module
 from .netcdf_handler import NetcdfHandler
@@ -17,10 +19,7 @@ import shutil
 import site
 import tempfile
 import json
-import time as py_time
 from .time_series_tool import TimeSeriesMapTool
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QPointF
-from qgis.core import QgsPointXY, QgsGeometry, QgsWkbTypes
 
 TIME_SERIES_COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
@@ -611,6 +610,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             )
             return False
 
+        python_executable = os.path.abspath(python_executable)
         ALLOWED_PACKAGES = {"netCDF4", "pyqtgraph"}
         if package_name not in ALLOWED_PACKAGES:
             self._show_install_failure(package_name, "Unauthorized package installation requested.")
@@ -624,13 +624,13 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
 
         try:
             for command in commands:
-                result = subprocess.run(
+                result = subprocess.run(  # nosec B603
                     command,
                     capture_output=True,
                     text=True,
                     check=False,
                     shell=False,
-                )
+                )  # nosec B603
                 install_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
                 if result.returncode == 0:
                     break
@@ -744,15 +744,16 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not candidate or not isinstance(candidate, str) or not os.path.isfile(candidate):
             return (False, False)
 
+        candidate_path = os.path.abspath(candidate)
         try:
-            check_python = subprocess.run(
-                [candidate, '-c', 'import sys'],
+            check_python = subprocess.run(  # nosec B603
+                [candidate_path, '-c', 'import sys'],
                 capture_output=True,
                 text=True,
                 check=False,
                 shell=False,
                 timeout=10,
-            )
+            )  # nosec B603
         except (subprocess.SubprocessError, OSError):
             return (False, False)
 
@@ -760,14 +761,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return (False, False)
 
         try:
-            check_pip = subprocess.run(
-                [candidate, '-m', 'pip', '--version'],
+            check_pip = subprocess.run(  # nosec B603
+                [candidate_path, '-m', 'pip', '--version'],
                 capture_output=True,
                 text=True,
                 check=False,
                 shell=False,
                 timeout=10,
-            )
+            )  # nosec B603
             return (True, check_pip.returncode == 0)
         except (subprocess.SubprocessError, OSError):
             return (True, False)
@@ -1560,7 +1561,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 style = QgsStyle.defaultStyle()
                 ramp = style.colorRamp(name)
                 if not ramp:
-                    from qgis.PyQt.QtGui import QColor
                     return QgsGradientColorRamp(QColor(default_colors[0]), QColor(default_colors[1]))
                 return ramp
 
@@ -1623,8 +1623,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     return QgsGradientColorRamp(QColor(default_colors[0]), QColor(default_colors[1]))
                 return ramp
 
-            from qgis.PyQt.QtGui import QColor
-            from qgis.core import QgsMeshRendererScalarSettings
             ramp = get_ramp("Turbo", ["blue", "red"])
             if not ramp:
                 return
@@ -2019,10 +2017,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 win.hide()
             
             # Create RubberBand
-            from qgis.gui import QgsRubberBand
-            from qgis.core import QgsWkbTypes
-            from qgis.PyQt.QtGui import QColor
-            
             rubber_band = QgsRubberBand(self.iface.mapCanvas(), QgsWkbTypes.GeometryType.LineGeometry)
             rubber_band.setColor(QColor(255, 0, 0, 180)) 
             rubber_band.setWidth(3)
@@ -2139,7 +2133,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             print(f"Error updating cross-section on change: {e}")
 
     def highlight_cross_section(self, item):
-        from qgis.PyQt.QtGui import QColor
         item_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         # Highlight rubber band on map
@@ -2310,7 +2303,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     
             # Reset CS highlight state (un-highlight all)
             for rb in self.cs_rubber_bands.values():
-                from qgis.PyQt.QtGui import QColor
                 rb.setWidth(2)
                 rb.setColor(QColor(255, 0, 0, 100))
             self.active_cs_id = None
@@ -2558,7 +2550,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return _handler.get_timeseries_data(v, pt, lyrs, extra_dim_indices=edi)
 
         # Fetch initial data
-        from qgis.PyQt.QtGui import QColor
         from qgis.gui import QgsVertexMarker
         try:
             data = _handler.get_timeseries_data(var_name, point, layer_indices,
@@ -2882,7 +2873,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         try:
             from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY
             from qgis.gui import QgsVertexMarker
-            from qgis.PyQt.QtGui import QColor
             
             canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
             model_crs_def = self.handler.get_crs()
@@ -3007,8 +2997,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if self.is_restoring:
             return
             
-        import json
-        from qgis.core import QgsProject
         filepath = self.file_edit.text()
         QgsProject.instance().writeEntry("NlmodViewer", "filepath", filepath)
         
@@ -3076,10 +3064,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         """Restores plugin state from project entries."""
         self.is_restoring = True
         try:
-            import json
-            import os
-            from qgis.core import QgsProject, QgsPointXY, Qgis, QgsMessageLog
-            
             # Determine which scope to use (new name first, fallback to old name)
             scope = "NlmodViewer"
             _, ok = QgsProject.instance().readEntry(scope, "filepath", "")
@@ -3188,7 +3172,6 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         if not self.handler:
             return
             
-        from qgis.core import QgsProject, Qgis, QgsMessageLog
         filepath = self.handler.filepath
         layers_to_refresh = []
         

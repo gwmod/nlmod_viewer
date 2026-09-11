@@ -1,6 +1,7 @@
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsProject
 from .nlmod_dockwidget import NlmodDockWidget
 import os
 
@@ -25,7 +26,6 @@ class NlmodViewer:
         self.iface.addToolBarIcon(self.action)
 
         # Connect to project signals for automatic restoration
-        from qgis.core import QgsProject
         QgsProject.instance().readProject.connect(self.on_project_read)
         QgsProject.instance().cleared.connect(self.on_project_new)
 
@@ -37,12 +37,9 @@ class NlmodViewer:
         """Called when a project is loaded."""
         # Use a small delay because QgsProject entries might not be ready 
         # immediately when the signal fires in some QGIS versions.
-        from qgis.PyQt.QtCore import QTimer
         QTimer.singleShot(200, self._deferred_on_project_read)
 
     def _deferred_on_project_read(self):
-        from qgis.core import QgsProject
-        
         # 0. Clear any existing state from previous project
         if self.dockwidget:
             self.dockwidget.clear_all_cross_sections()

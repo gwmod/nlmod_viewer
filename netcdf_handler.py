@@ -8,14 +8,9 @@ except ImportError:
     netCDF4 = None
 
 try:
-    from scipy.spatial import cKDTree
-except ImportError:
-    cKDTree = None
-
-try:
     import shapely
-    from shapely.geometry import LineString, Polygon, MultiLineString
-    from shapely import STRtree, intersection, line_locate_point, get_coordinates, box
+    from shapely.geometry import LineString, Polygon
+    from shapely import STRtree, intersection, line_locate_point, box
 except ImportError:
     shapely = None
 
@@ -271,7 +266,6 @@ class NetcdfHandler:
 
     def transform_model_to_world(self, xm, ym):
         """Transforms model coordinates (xm, ym) to world coordinates (xw, yw)."""
-        import numpy as np
         if self.is_absolute:
             return xm, ym
             
@@ -288,7 +282,6 @@ class NetcdfHandler:
 
     def transform_world_to_model(self, xw, yw):
         """Transforms world coordinates (xw, yw) to model coordinates (xm, ym)."""
-        import numpy as np
         if self.is_absolute:
             return xw, yw
             
@@ -308,7 +301,6 @@ class NetcdfHandler:
 
     def get_geotransform(self, var_name=None):
         """Calculates the GDAL 6-parameter geotransform [ulx, dx, rotation, uly, rotation, -dy]."""
-        import numpy as np
         if not self.ds or self.grid_type != 'structured':
             return None
             
@@ -437,8 +429,6 @@ class NetcdfHandler:
                     t_var = self.ds.variables[d]
                     vals = t_var[:]
                     try:
-                        import netCDF4
-                        import numpy as np
                         from datetime import datetime
                         if hasattr(t_var, 'units'):
                             cal = getattr(t_var, 'calendar', 'standard')
@@ -537,8 +527,6 @@ class NetcdfHandler:
                         t_var = self.ds.variables[d]
                         vals = t_var[:]
                         try:
-                            import netCDF4
-                            import numpy as np
                             if hasattr(t_var, 'units'):
                                 cal = getattr(t_var, 'calendar', 'standard')
                                 dates = netCDF4.num2date(vals, units=t_var.units, calendar=cal)
@@ -619,7 +607,6 @@ class NetcdfHandler:
             return None
             
         try:
-            import numpy as np
             from qgis.core import QgsMessageLog, Qgis
             
             x_var = None
@@ -770,7 +757,6 @@ class NetcdfHandler:
 
     def _get_centroids(self):
         """Helper to get or calculate centroids for any grid type."""
-        import numpy as np
 
         def _looks_absolute_world(x_vals, y_vals):
             """Heuristic: coordinates close to origin offsets are likely already world-space."""
@@ -877,8 +863,6 @@ class NetcdfHandler:
         """
         if not self.ds:
             return None
-
-        import numpy as np
         
         # 1. Prepare Line and Bounds
         pts_world = []
@@ -1164,9 +1148,6 @@ class NetcdfHandler:
             return False, "Variable not found"
             
         try:
-            import netCDF4
-            import numpy as np
-            
             # 1. Prepare data slice
             var = self.ds.variables[var_name]
             
@@ -1277,7 +1258,6 @@ class NetcdfHandler:
                 mesh_v.face_node_connectivity_filler_value = nodata
 
             # The Data Variable
-            import numpy as np
             fill_val = -9999.0 # Explicit float fill value for compatibility
             
             data_v = out_ds.createVariable(var_name, 'f4', ('icell2d',), fill_value=fill_val)
@@ -1320,7 +1300,6 @@ class NetcdfHandler:
         if not self.ds or var_name not in self.ds.variables:
             return None
 
-        import numpy as np
         wx, wy = None, None
         mx, my = None, None
         if world_pt is not None:
@@ -1535,7 +1514,6 @@ class NetcdfHandler:
             return {"min": 0.0, "max": 1.0}
         
         try:
-            import numpy as np
             var = self.ds.variables[var_name]
             dims = var.dimensions
             sl = [slice(None)] * var.ndim

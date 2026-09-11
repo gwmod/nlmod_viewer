@@ -1,7 +1,9 @@
-from qgis.core import QgsWkbTypes, QgsPointXY, QgsGeometry, Qgis, QgsMessageLog
+from qgis.core import QgsWkbTypes, QgsPointXY, QgsGeometry
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtWidgets import QMenu, QAction
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
+
 
 class CrossSectionMapTool(QgsMapTool):
     # Signal emitted when a line is completed: List of QgsPointXY
@@ -121,7 +123,6 @@ class CrossSectionMapTool(QgsMapTool):
                         segment_info = res # (sqDist, closestPoint, afterVertex, leftOf)
 
                 # 3. Build and show Menu
-                from qgis.PyQt.QtWidgets import QMenu, QAction
                 menu = QMenu(self.canvas)
                 
                 if vertex_idx != -1:
