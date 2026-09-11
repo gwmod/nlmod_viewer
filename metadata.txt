@@ -9,6 +9,7 @@ email=r.calje@artesia-water.nl
 about=A plugin to read nlmod-specific NetCDF files to inspect groundwater model data (structured and vertex grids).
 tracker=https://github.com/gwmod/nlmod_viewer/issues
 repository=https://github.com/gwmod/nlmod_viewer/
+homepage=https://github.com/gwmod/nlmod_viewer#readme
 icon=icons/icon.png
 category=Plugins
 changelog=
