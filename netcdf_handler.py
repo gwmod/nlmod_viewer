@@ -324,28 +324,36 @@ class NetcdfHandler:
         dx = self._estimate_axis_spacing(x_vals, axis_name='x', context='get_geotransform')
         dy = self._estimate_axis_spacing(y_vals, axis_name='y', context='get_geotransform')
         
-        # Model space limits (bottom-left origin)
+        # Model space limits
         xm_min = np.min(x_vals) - dx/2
+        ym_min = np.min(y_vals) - dy/2
         ym_max = np.max(y_vals) + dy/2
         
-        # 2. Transform model top-left (xm_min, ym_max) to world space top-left
+        # Determine whether raw Y axis in NetCDF dataset is ascending or descending
+        y_is_ascending = (y_vals_raw[1] > y_vals_raw[0]) if len(y_vals_raw) >= 2 else True
+
         if not self.is_absolute:
-            # Rotation angle in radians
             a = np.radians(self.angrot)
             cosa = np.cos(a)
             sina = np.sin(a)
             
-            # World Top-Left (ulx, uly)
-            ulx = self.xorigin + xm_min * cosa - ym_max * sina
-            uly = self.yorigin + xm_min * sina + ym_max * cosa
-            
-            # Geotransform parameters (pixel to world)
-            return [ulx, dx * cosa, dy * sina, uly, dx * sina, -dy * cosa]
+            if y_is_ascending:
+                # GDAL NetCDF driver reads NetCDF array row ny-1 (ym_max, North) into GDAL row 0.
+                # So GDAL row 0 corresponds to top-left in model space (xm_min, ym_max).
+                ulx = self.xorigin + xm_min * cosa - ym_max * sina
+                uly = self.yorigin + xm_min * sina + ym_max * cosa
+                return [ulx, dx * cosa, dy * sina, uly, dx * sina, -dy * cosa]
+            else:
+                # GDAL NetCDF driver reads NetCDF array row ny-1 (ym_min, South) into GDAL row 0.
+                # So GDAL row 0 corresponds to bottom-left in model space (xm_min, ym_min).
+                bl_x = self.xorigin + xm_min * cosa - ym_min * sina
+                bl_y = self.yorigin + xm_min * sina + ym_min * cosa
+                return [bl_x, dx * cosa, -dy * sina, bl_y, dx * sina, dy * cosa]
         else:
-            # Already absolute: just need standard 0-rotation geotransform?
-            # Actually, even if absolute, it COULD be rotated, but flopy usually doesn't do that.
-            # If it's absolute, xm_min/ym_max ARE the world coordinates.
-            return [xm_min, dx, 0, ym_max, 0, -dy]
+            if y_is_ascending:
+                return [xm_min, dx, 0, ym_max, 0, -dy]
+            else:
+                return [xm_min, dx, 0, ym_min, 0, dy]
 
     def get_vars_with_time(self):
         """Returns a list of variable names that have a time dimension."""

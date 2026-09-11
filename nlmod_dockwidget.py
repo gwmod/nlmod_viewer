@@ -1417,38 +1417,14 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     subdataset_uri = f'NETCDF:"{safe_path}":{var_name}'
                     ds = gdal.Open(subdataset_uri)
                     if ds:
-                        if self.handler.angrot == 0:
-                            # Standard Non-Rotated: Use Translate with outputBounds for auto-flipping
-                            xmin, xmax, ymin, ymax, y_is_ascending = extent
-                            vrt_ds = gdal.Translate('', ds, format='VRT', 
-                                                    outputBounds=[xmin, ymin, xmax, ymax], 
-                                                    bandList=[band_idx])
-                        else:
-                            # Rotated Grid: Manual Geotransform
-                            # Translate first just to extract the band and basic VRT structure
-                            vrt_ds = gdal.Translate('', ds, format='VRT', bandList=[band_idx])
-                            if vrt_ds:
-                                vrt_ds.SetGeoTransform(geotransform)
-                                # We might still need the CRS from the handler
-                                crs_wkt = self.handler.get_crs()
-                                if crs_wkt:
-                                    vrt_ds.SetProjection(crs_wkt)
-                        
+                        vrt_ds = gdal.Translate('', ds, format='VRT', bandList=[band_idx])
                         if vrt_ds:
+                            vrt_ds.SetGeoTransform(geotransform)
+                            crs_wkt = self.handler.get_crs()
+                            if crs_wkt:
+                                vrt_ds.SetProjection(crs_wkt)
                             vrt_xml = vrt_ds.GetMetadata('xml:VRT')[0]
                             vrt_ds = None # Close
-                            
-                            # Handle Ascending Y if necessary
-                            y_is_ascending = extent[4]
-                            if y_is_ascending and self.handler.angrot == 0:
-                                var_info = self.handler.ds.variables[var_name]
-                                y_size = var_info.shape[-2] if var_info.ndim >= 2 else 0
-                                if y_size > 0:
-                                    vrt_xml = vrt_xml.replace('yOff="0"', f'yOff="{y_size}"')
-                                    vrt_xml = vrt_xml.replace(f'ySize="{y_size}"', f'ySize="-{y_size}"')
-                                    QgsMessageLog.logMessage(f"NLMOD: Applied VRT flip for ascending Y (size={y_size})", "NLMOD Viewer", Qgis.MessageLevel.Info)
-                            elif y_is_ascending and self.handler.angrot != 0:
-                                QgsMessageLog.logMessage("NLMOD: Skipped VRT Y-flip for rotated grid; geotransform handles row orientation.", "NLMOD Viewer", Qgis.MessageLevel.Info)
                         else:
                             raise Exception("gdal.Translate failed")
                         ds = None
@@ -2615,8 +2591,8 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         win.variable_changed.connect(lambda id, v: self.update_ts_list_item(id))
         win.variable_changed.connect(lambda id, v: self.sync_ts_on_cross_sections())
         win.marker_changed.connect(self.update_ts_marker)
-        win.layers_changed.connect(lambda id, l: self.save_state_to_project())
-        win.layers_changed.connect(lambda id, l: self.sync_ts_on_cross_sections())
+        win.layers_changed.connect(lambda item_id, layers: self.save_state_to_project())
+        win.layers_changed.connect(lambda item_id, layers: self.sync_ts_on_cross_sections())
         # Removing win.closed connection to remove_time_series_by_id 
         # so closing the pane doesn't remove it from the list.
         # Change visibility to Bottom pane as requested
