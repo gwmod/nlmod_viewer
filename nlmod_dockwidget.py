@@ -13,6 +13,7 @@ import subprocess
 import os
 import sys
 import glob
+import shutil
 import site
 import tempfile
 import json
@@ -658,17 +659,20 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             seen.add(normalized)
             candidates.append(normalized)
 
-        exe_name = os.path.basename(sys.executable).lower()
-        if exe_name.startswith('python'):
-            add_candidate(sys.executable)
+        # Prefer the runtime executable if it is actually Python.
+        add_candidate(sys.executable)
 
         for env_key in ('PYTHONHOME', 'OSGEO4W_ROOT'):
             env_value = os.environ.get(env_key)
             if env_value:
                 add_candidate(os.path.join(env_value, 'python.exe'))
                 add_candidate(os.path.join(env_value, 'python3.exe'))
+                add_candidate(os.path.join(env_value, 'python'))
+                add_candidate(os.path.join(env_value, 'python3'))
                 add_candidate(os.path.join(env_value, 'bin', 'python.exe'))
                 add_candidate(os.path.join(env_value, 'bin', 'python3.exe'))
+                add_candidate(os.path.join(env_value, 'bin', 'python'))
+                add_candidate(os.path.join(env_value, 'bin', 'python3'))
                 add_candidate(os.path.join(env_value, 'apps', 'Python', 'python.exe'))
                 for match in glob.glob(os.path.join(env_value, 'apps', 'Python*', 'python.exe')):
                     add_candidate(match)
@@ -678,18 +682,82 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 continue
             add_candidate(os.path.join(prefix, 'python.exe'))
             add_candidate(os.path.join(prefix, 'python3.exe'))
+            add_candidate(os.path.join(prefix, 'python'))
+            add_candidate(os.path.join(prefix, 'python3'))
             add_candidate(os.path.join(prefix, 'bin', 'python.exe'))
             add_candidate(os.path.join(prefix, 'bin', 'python3.exe'))
+            add_candidate(os.path.join(prefix, 'bin', 'python'))
+            add_candidate(os.path.join(prefix, 'bin', 'python3'))
             for match in glob.glob(os.path.join(prefix, 'Python*', 'python.exe')):
                 add_candidate(match)
             for match in glob.glob(os.path.join(prefix, 'apps', 'Python*', 'python.exe')):
                 add_candidate(match)
 
+        # macOS: QGIS ships Python inside the app bundle.
+        if sys.platform == 'darwin':
+            mac_roots = [
+                '/Applications/QGIS.app/Contents',
+                '/Applications/QGIS-LTR.app/Contents',
+            ]
+
+            qgis_prefix = os.environ.get('QGIS_PREFIX_PATH')
+            if qgis_prefix:
+                if qgis_prefix.endswith('/Contents'):
+                    mac_roots.append(qgis_prefix)
+                elif '/Contents/' in qgis_prefix:
+                    mac_roots.append(qgis_prefix.split('/Contents/', 1)[0] + '/Contents')
+
+            for root in mac_roots:
+                add_candidate(os.path.join(root, 'MacOS', 'bin', 'python3'))
+                add_candidate(os.path.join(root, 'MacOS', 'bin', 'python'))
+                add_candidate(os.path.join(root, 'Frameworks', 'Python.framework', 'Versions', 'Current', 'bin', 'python3'))
+                add_candidate(os.path.join(root, 'Frameworks', 'Python.framework', 'Versions', 'Current', 'bin', 'python'))
+
+        # Fall back to user PATH.
+        add_candidate(shutil.which('python3'))
+        add_candidate(shutil.which('python'))
+
+        first_python = None
         for candidate in candidates:
-            if os.path.isfile(candidate):
+            is_python, has_pip = self._probe_python_executable(candidate)
+            if not is_python:
+                continue
+            if first_python is None:
+                first_python = candidate
+            if has_pip:
                 return candidate
 
-        return None
+        return first_python
+
+    def _probe_python_executable(self, candidate):
+        if not candidate or not os.path.isfile(candidate):
+            return (False, False)
+
+        try:
+            check_python = subprocess.run(
+                [candidate, '-c', 'import sys'],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return (False, False)
+
+        if check_python.returncode != 0:
+            return (False, False)
+
+        try:
+            check_pip = subprocess.run(
+                [candidate, '-m', 'pip', '--version'],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            return (True, check_pip.returncode == 0)
+        except Exception:
+            return (True, False)
 
     def _is_package_importable(self, import_name):
         if import_name == 'netCDF4':
