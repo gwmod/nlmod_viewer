@@ -671,10 +671,20 @@ class NetcdfHandler:
                 if hasattr(self.ds, 'extent'):
                     ext = self.ds.extent
                     if len(ext) == 4:
-                         # For nlmod, if we only have extent, it's often South-to-North (Ascending)
-                         # Previous Hardcoded 'False' was reported as flipped.
                          QgsMessageLog.logMessage(f"NLMOD: Found extent via attribute (no coords): {ext}. Defaulting Ascending=True", "NLMOD Viewer", Qgis.MessageLevel.Info)
-                         return (ext[0], ext[1], ext[2], ext[3], True)
+                         xm_min, xm_max, ym_min, ym_max = float(ext[0]), float(ext[1]), float(ext[2]), float(ext[3])
+                         if (self.angrot != 0 or self.xorigin != 0 or self.yorigin != 0) and not self.is_absolute:
+                             corners = [
+                                 (xm_min, ym_min), (xm_max, ym_min),
+                                 (xm_max, ym_max), (xm_min, ym_max)
+                             ]
+                             xw_list, yw_list = [], []
+                             for cx, cy in corners:
+                                 xw, yw = self.transform_model_to_world(cx, cy)
+                                 xw_list.append(xw)
+                                 yw_list.append(yw)
+                             return (min(xw_list), max(xw_list), min(yw_list), max(yw_list), True)
+                         return (xm_min, xm_max, ym_min, ym_max, True)
                 return None
             
             # Use detected coords to determine direction
@@ -691,36 +701,31 @@ class NetcdfHandler:
             else:
                 y_is_ascending = False
 
-            # Check for global extent attribute for bounds
-            if hasattr(self.ds, 'extent'):
+            # Determine model space bounds (prefer global extent attribute if available, else compute from coords)
+            if hasattr(self.ds, 'extent') and len(self.ds.extent) == 4:
                 ext = self.ds.extent
-                if len(ext) == 4:
-                     QgsMessageLog.logMessage(f"NLMOD: Using global extent for bounds, Ascending={y_is_ascending}", "NLMOD Viewer", Qgis.MessageLevel.Info)
-                     return (ext[0], ext[1], ext[2], ext[3], y_is_ascending)
-
-            # Otherwise calculate bounds from coords
-            x = x_vals
-            y = y_vals
-            
-            if len(x) < 2 or len(y) < 2:
-                QgsMessageLog.logMessage("NLMOD: Coordinate arrays too short.", "NLMOD Viewer", Qgis.MessageLevel.Warning)
-                return None
+                QgsMessageLog.logMessage(f"NLMOD: Using global extent for bounds, Ascending={y_is_ascending}", "NLMOD Viewer", Qgis.MessageLevel.Info)
+                xm_min, xm_max, ym_min, ym_max = float(ext[0]), float(ext[1]), float(ext[2]), float(ext[3])
+            else:
+                x = x_vals
+                y = y_vals
+                if len(x) < 2 or len(y) < 2:
+                    QgsMessageLog.logMessage("NLMOD: Coordinate arrays too short.", "NLMOD Viewer", Qgis.MessageLevel.Warning)
+                    return None
+                    
+                dx = self._estimate_axis_spacing(x, axis_name='x', context='get_extent')
+                dy = self._estimate_axis_spacing(y, axis_name='y', context='get_extent')
                 
-            # Determine cell sizes (dx, dy)
-            dx = self._estimate_axis_spacing(x, axis_name='x', context='get_extent')
-            dy = self._estimate_axis_spacing(y, axis_name='y', context='get_extent')
-            
-            # Model space bounds
-            xm_min = np.min(x) - dx/2
-            xm_max = np.max(x) + dx/2
-            ym_min = np.min(y) - dy/2
-            ym_max = np.max(y) + dy/2
+                xm_min = np.min(x) - dx/2
+                xm_max = np.max(x) + dx/2
+                ym_min = np.min(y) - dy/2
+                ym_max = np.max(y) + dy/2
             
             # Now transform corners if rotated or moved from QGIS 0,0
             if (self.angrot == 0 and self.xorigin == 0 and self.yorigin == 0) or self.is_absolute:
                 return (xm_min, xm_max, ym_min, ym_max, y_is_ascending)
             
-            # Calculate 4 corners in model space and transform
+            # Calculate 4 corners in model space and transform to world space
             corners = [
                 (xm_min, ym_min), (xm_max, ym_min),
                 (xm_max, ym_max), (xm_min, ym_max)
