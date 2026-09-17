@@ -94,7 +94,7 @@ class PointEditorDialog(QtWidgets.QDialog):
             return None
 
 class MainSettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, auto_var=False, auto_layer=False, auto_time=False):
+    def __init__(self, parent=None, auto_var=True, auto_layer=True, auto_time=True):
         super().__init__(parent)
         self.setWindowTitle("Global Settings")
         layout = QtWidgets.QVBoxLayout(self)
@@ -380,9 +380,9 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         self.sync_marker = None   # Marker for plot synchronization
         
         # Auto-update settings
-        self.auto_update_var = False
-        self.auto_update_layer = False
-        self.auto_update_time = False
+        self.auto_update_var = True
+        self.auto_update_layer = True
+        self.auto_update_time = True
         self.auto_update_color = True
         self._shown_structured_fallback_popup = False
         self._extra_dim_selections = {}  # var_name -> {dim_name: int_index}
@@ -622,6 +622,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
         ]
         install_output = ""
 
+        extra_kwargs = {}
+        if sys.platform == 'win32' and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+            extra_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
         try:
             for command in commands:
                 result = subprocess.run(  # nosec B603
@@ -630,6 +634,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                     text=True,
                     check=False,
                     shell=False,
+                    **extra_kwargs,
                 )  # nosec B603
                 install_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
                 if result.returncode == 0:
@@ -655,6 +660,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             )
             return False
 
+        self._show_install_success(package_name)
         return True
 
     def _find_qgis_python_executable(self):
@@ -665,13 +671,19 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             if not path:
                 return
             normalized = os.path.normpath(path)
+            basename = os.path.basename(normalized).lower()
+            # Skip qgis main executable (e.g. qgis-bin.exe, qgis.exe, qgis-ltr-bin.exe)
+            # because running it launches the QGIS GUI and splash screen!
+            if basename.startswith('qgis'):
+                return
             if normalized in seen:
                 return
             seen.add(normalized)
             candidates.append(normalized)
 
-        # Prefer the runtime executable if it is actually Python.
-        add_candidate(sys.executable)
+        # Prefer the runtime executable if it is actually Python (not QGIS GUI).
+        if sys.executable and not os.path.basename(sys.executable).lower().startswith('qgis'):
+            add_candidate(sys.executable)
 
         for env_key in ('PYTHONHOME', 'OSGEO4W_ROOT'):
             env_value = os.environ.get(env_key)
@@ -745,6 +757,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return (False, False)
 
         candidate_path = os.path.abspath(candidate)
+        extra_kwargs = {}
+        if sys.platform == 'win32' and hasattr(subprocess, 'CREATE_NO_WINDOW'):
+            extra_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
         try:
             check_python = subprocess.run(  # nosec B603
                 [candidate_path, '-c', 'import sys'],
@@ -753,6 +769,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 check=False,
                 shell=False,
                 timeout=10,
+                **extra_kwargs,
             )  # nosec B603
         except (subprocess.SubprocessError, OSError):
             return (False, False)
@@ -768,6 +785,7 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                 check=False,
                 shell=False,
                 timeout=10,
+                **extra_kwargs,
             )  # nosec B603
             return (True, check_pip.returncode == 0)
         except (subprocess.SubprocessError, OSError):
@@ -785,9 +803,10 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             return False
 
     def _refresh_python_import_state(self, import_name):
-        """Refresh site paths and import caches so newly installed packages are discoverable."""
+        """Refresh site paths, DLL search paths, and import caches so newly installed packages are immediately discoverable."""
         path_candidates = []
 
+        # 1. Gather site-packages candidates
         try:
             user_site = site.getusersitepackages()
             if isinstance(user_site, str):
@@ -795,38 +814,99 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
             elif isinstance(user_site, (list, tuple)):
                 path_candidates.extend(user_site)
         except (AttributeError, OSError):
-            user_site = None
+            pass
 
         try:
             for sp in site.getsitepackages():
                 path_candidates.append(sp)
         except (AttributeError, OSError):
-            site_packages = []
+            pass
 
+        for path_entry in list(sys.path):
+            if path_entry and ('site-packages' in path_entry or 'dist-packages' in path_entry):
+                path_candidates.append(path_entry)
+
+        # OSGeo4W / standard QGIS python site-packages candidates
+        for prefix in (sys.prefix, sys.exec_prefix, os.environ.get('OSGEO4W_ROOT')):
+            if prefix:
+                path_candidates.append(os.path.join(prefix, 'Lib', 'site-packages'))
+                path_candidates.append(os.path.join(prefix, 'apps', 'Python312', 'Lib', 'site-packages'))
+                for match in glob.glob(os.path.join(prefix, 'apps', 'Python*', 'Lib', 'site-packages')):
+                    path_candidates.append(match)
+
+        # 2. Add all existing candidates to sys.path via site.addsitedir
+        valid_paths = set()
         for p in path_candidates:
-            try:
-                if p and os.path.isdir(p):
-                    site.addsitedir(p)
-            except (AttributeError, OSError):
-                p_valid = False
-
-        # Remove failed/partial imports so a fresh import attempt is possible.
-        if import_name in sys.modules:
-            try:
-                del sys.modules[import_name]
-            except KeyError:
-                sys.modules.pop(import_name, None)
-
-        # netCDF4 can leave submodules in a partial state after a failed import.
-        if import_name == 'netCDF4':
-            stale = [m for m in list(sys.modules.keys()) if m == 'netCDF4' or m.startswith('netCDF4.')]
-            for m in stale:
+            if p and os.path.isdir(p):
+                norm_p = os.path.normpath(p)
+                valid_paths.add(norm_p)
                 try:
-                    del sys.modules[m]
-                except KeyError:
-                    sys.modules.pop(m, None)
+                    site.addsitedir(norm_p)
+                except (AttributeError, OSError):
+                    pass
+                if norm_p not in sys.path:
+                    sys.path.append(norm_p)
 
+        # 3. Register DLL directories on Windows (crucial for C extensions like netCDF4)
+        if sys.platform == 'win32':
+            bin_dirs = []
+            osgeo_root = os.environ.get('OSGEO4W_ROOT')
+            if osgeo_root:
+                bin_dirs.append(os.path.join(osgeo_root, 'bin'))
+            if sys.prefix:
+                bin_dirs.append(os.path.join(sys.prefix, 'bin'))
+            if sys.executable:
+                bin_dirs.append(os.path.dirname(sys.executable))
+
+            # Scan site-packages for *.libs directories (e.g. netCDF4.libs) created by wheel installations
+            for sp in valid_paths:
+                try:
+                    for entry in os.listdir(sp):
+                        if entry.endswith('.libs'):
+                            libs_path = os.path.join(sp, entry)
+                            if os.path.isdir(libs_path):
+                                bin_dirs.append(libs_path)
+                except OSError:
+                    pass
+
+            current_path = os.environ.get('PATH', '')
+            for bin_dir in bin_dirs:
+                if os.path.isdir(bin_dir):
+                    norm_bin = os.path.normpath(bin_dir)
+                    if norm_bin not in current_path.split(os.path.pathsep):
+                        os.environ['PATH'] = norm_bin + os.path.pathsep + current_path
+                        current_path = os.environ['PATH']
+                    if hasattr(os, 'add_dll_directory'):
+                        try:
+                            os.add_dll_directory(norm_bin)
+                        except (OSError, ValueError):
+                            pass
+
+        # 4. Remove all stale module entries from sys.modules for import_name and any submodules
+        stale_modules = [m for m in list(sys.modules.keys()) if m == import_name or m.startswith(import_name + '.')]
+        for m in stale_modules:
+            try:
+                del sys.modules[m]
+            except KeyError:
+                sys.modules.pop(m, None)
+
+        if import_name == 'netCDF4':
+            netcdf_handler_module.netCDF4 = None
+
+        # 5. Clear importer caches
+        if hasattr(sys, 'path_importer_cache'):
+            sys.path_importer_cache.clear()
         importlib.invalidate_caches()
+
+    def _show_install_success(self, package_name):
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        msg_box.setWindowTitle("Installation Successful")
+        msg_box.setText(f"Installation of '{package_name}' completed successfully.")
+        msg_box.setInformativeText(
+            f"The Python package '{package_name}' has been installed and loaded into the QGIS environment."
+        )
+        msg_box.exec()
 
     def _show_install_failure(self, package_name, details):
         msg_box = QtWidgets.QMessageBox(self)
@@ -3068,11 +3148,11 @@ class NlmodDockWidget(QtWidgets.QDockWidget):
                         time_idx = 0
                 
                 # Restore auto-update settings
-                v, _ = QgsProject.instance().readEntry(scope, "auto_update_var", "false")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_var", "true")
                 self.auto_update_var = (v == "true")
-                v, _ = QgsProject.instance().readEntry(scope, "auto_update_layer", "false")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_layer", "true")
                 self.auto_update_layer = (v == "true")
-                v, _ = QgsProject.instance().readEntry(scope, "auto_update_time", "false")
+                v, _ = QgsProject.instance().readEntry(scope, "auto_update_time", "true")
                 self.auto_update_time = (v == "true")
                 v, _ = QgsProject.instance().readEntry(scope, "auto_update_color", "true")
                 self.auto_update_color = (v == "true")

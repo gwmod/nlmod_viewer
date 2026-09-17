@@ -12,6 +12,7 @@ repository=https://github.com/gwmod/nlmod_viewer/
 homepage=https://github.com/gwmod/nlmod_viewer#readme
 icon=icons/icon.png
 category=Plugins
+external_deps=netCDF4,pyqtgraph
 experimental=False
 changelog=
     0.1.2: Fix bug with zooming to wrong extent for rotated grids
